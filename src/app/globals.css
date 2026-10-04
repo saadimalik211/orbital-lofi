@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+:root {
+  --background: #050807;
+  --foreground: #c9eadb;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.hud-slider {
+  appearance: none;
+  height: 1px;
+  background: rgba(143, 184, 165, 0.45);
+  outline: none;
+}
+
+.hud-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 7px;
+  height: 14px;
+  background: #d8fff0;
+  cursor: pointer;
+}
+
+.hud-slider::-moz-range-thumb {
+  width: 7px;
+  height: 14px;
+  border: 0;
+  background: #d8fff0;
+  cursor: pointer;
+}
