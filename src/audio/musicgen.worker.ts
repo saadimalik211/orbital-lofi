@@ -122,5 +122,5 @@ async function handle(message: MusicgenIncomingMessage) {
 let queue = Promise.resolve();
 
 self.onmessage = (event: MessageEvent<MusicgenIncomingMessage>) => {
-  queue = queue.then(() => handle(event.data));
+  queue = queue.then(() => handle(event.data)).catch(() => undefined);
 };

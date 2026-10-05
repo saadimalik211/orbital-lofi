@@ -1,9 +1,9 @@
-import type { World } from "@/worlds/types";
+import type { World, WorldId } from "@/worlds/types";
 
 type WorldSelectorProps = {
   worlds: World[];
-  selectedWorldId: string;
-  onSelect: (worldId: string) => void;
+  selectedWorldId: WorldId;
+  onSelect: (worldId: WorldId) => void;
 };
 
 export function WorldSelector({
@@ -12,7 +12,7 @@ export function WorldSelector({
   onSelect,
 }: WorldSelectorProps) {
   return (
-    <nav aria-label="World selector" className="flex flex-wrap items-center gap-x-4 gap-y-2">
+    <nav aria-label="World selector" className="flex max-w-full flex-wrap items-center gap-x-2 gap-y-1 sm:gap-x-4 sm:gap-y-2">
       {worlds.map((world, index) => {
         const selected = world.id === selectedWorldId;
 
@@ -22,10 +22,8 @@ export function WorldSelector({
             type="button"
             onClick={() => onSelect(world.id)}
             aria-pressed={selected}
-            className={`font-mono text-[11px] tracking-[0.22em] uppercase transition-colors ${
-              selected
-                ? "text-[#d8fff0]"
-                : "text-[#7f9a8e] hover:text-[#c3e6d4]"
+            className={`hud-btn px-1 font-mono text-[11px] tracking-[0.18em] uppercase sm:tracking-[0.22em] ${
+              selected ? "" : "hud-btn-quiet"
             }`}
           >
             <span className="mr-2 text-[9px] text-[#5e7a6d]">

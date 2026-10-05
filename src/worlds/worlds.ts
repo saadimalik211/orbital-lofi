@@ -1,28 +1,181 @@
-import type { World } from "./types";
+import type { World, WorldId } from "./types";
 
 export const worlds: World[] = [
   {
     id: "orbital-station",
     name: "Orbital Station",
     year: 2187,
-    backdrop: "orbital-station",
-    backgroundVideo: "/worlds/orbital-station/background.mp4",
     musicPrompt:
       "slow sci-fi lofi, orbital space station, muted electric piano, soft vinyl crackle, distant hum, 72 bpm, calm, looping instrumental",
+    music: { seed: 2187, bpm: 72, rootMidi: 57, swing: 0.58 },
+    ambience: [
+      {
+        id: "engine",
+        name: "Engine Hum",
+        src: "/worlds/orbital/audio/engine.wav",
+        defaultVolume: 0.35,
+      },
+      {
+        id: "vent",
+        name: "Ventilation",
+        src: "/worlds/orbital/audio/vent.wav",
+        defaultVolume: 0.28,
+      },
+      {
+        id: "radio",
+        name: "Radio Chatter",
+        src: "/worlds/orbital/audio/radio.wav",
+        defaultVolume: 0.2,
+      },
+    ],
+    effects: {
+      stars: { intensity: 0.32 },
+      fog: { intensity: 0.16 },
+      flicker: { intensity: 0.08, style: "screen" },
+    },
+    events: [
+      {
+        id: "shuttle-pass",
+        type: "flyby",
+        asset: "/worlds/orbital/events/shuttle.png",
+        direction: "either",
+        top: [14, 34],
+        scale: 0.9,
+        lightColor: "150, 220, 255",
+        weight: 3,
+        minDelay: 25_000,
+        maxDelay: 70_000,
+        cooldown: 45_000,
+        duration: 11_000,
+      },
+      {
+        id: "docking-beacon",
+        type: "pulse",
+        pattern: "beacon",
+        color: "255, 120, 90",
+        x: 78,
+        y: 22,
+        size: 18,
+        intensity: 0.5,
+        weight: 3,
+        minDelay: 20_000,
+        maxDelay: 55_000,
+        duration: 2_400,
+      },
+      {
+        id: "station-announcement",
+        type: "sound",
+        sound: { src: "/worlds/orbital/events/announcement.wav", volume: 0.45 },
+        weight: 2,
+        minDelay: 60_000,
+        maxDelay: 150_000,
+        cooldown: 120_000,
+        duration: 5_000,
+      },
+      {
+        id: "meteor",
+        type: "streak",
+        angle: 24,
+        weight: 1,
+        minDelay: 90_000,
+        maxDelay: 240_000,
+        cooldown: 180_000,
+        duration: 1_400,
+      },
+    ],
   },
   {
     id: "neon-city",
     name: "Neon City",
     year: 2194,
-    backdrop: "neon-city",
-    backgroundVideo: "/worlds/neon-city/background.mp4",
     musicPrompt:
       "night neon city lofi, rainy cyberpunk streets, warm bass, dusty drums, analog synths, 78 bpm, mellow, looping instrumental",
+    music: { seed: 2194, bpm: 78, rootMidi: 50, swing: 0.56 },
+    ambience: [
+      {
+        id: "rain",
+        name: "Rain",
+        src: "/worlds/neon/audio/rain.wav",
+        defaultVolume: 0.4,
+      },
+      {
+        id: "traffic",
+        name: "Traffic",
+        src: "/worlds/neon/audio/traffic.wav",
+        defaultVolume: 0.28,
+      },
+      {
+        id: "crowd",
+        name: "Crowd Noise",
+        src: "/worlds/neon/audio/crowd.wav",
+        defaultVolume: 0.22,
+      },
+    ],
+    effects: {
+      rain: { intensity: 0.52 },
+      fog: { intensity: 0.2 },
+      flicker: { intensity: 0.1, style: "neon" },
+    },
+    events: [
+      {
+        id: "hovercar-pass",
+        type: "flyby",
+        asset: "/worlds/neon/events/hovercar.png",
+        direction: "either",
+        top: [18, 42],
+        scale: 0.7,
+        lightColor: "255, 90, 190",
+        weight: 4,
+        minDelay: 20_000,
+        maxDelay: 60_000,
+        cooldown: 30_000,
+        duration: 8_000,
+      },
+      {
+        id: "sign-glitch",
+        type: "pulse",
+        pattern: "glitch",
+        color: "80, 220, 255",
+        x: 24,
+        y: 30,
+        size: 26,
+        intensity: 0.42,
+        weight: 3,
+        minDelay: 25_000,
+        maxDelay: 60_000,
+        duration: 1_800,
+      },
+      {
+        id: "distant-siren",
+        type: "sound",
+        sound: { src: "/worlds/neon/events/siren.wav", volume: 0.32 },
+        weight: 2,
+        minDelay: 60_000,
+        maxDelay: 180_000,
+        cooldown: 150_000,
+        duration: 7_000,
+      },
+      {
+        id: "distant-lightning",
+        type: "pulse",
+        pattern: "flash",
+        color: "200, 215, 255",
+        x: 62,
+        y: 8,
+        size: 90,
+        intensity: 0.2,
+        weight: 1,
+        minDelay: 120_000,
+        maxDelay: 300_000,
+        cooldown: 240_000,
+        duration: 1_600,
+      },
+    ],
   },
 ];
 
-export const defaultWorldId = worlds[0].id;
+export const defaultWorldId: WorldId = worlds[0].id;
 
-export function getWorldById(id: string): World | undefined {
-  return worlds.find((world) => world.id === id);
+export function getWorldById(id: WorldId): World {
+  return worlds.find((world) => world.id === id) ?? worlds[0];
 }

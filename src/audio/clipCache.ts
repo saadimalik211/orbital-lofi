@@ -1,8 +1,9 @@
 import type { GeneratedClip } from "@/audio/musicgenClient";
+import type { WorldId } from "@/worlds/types";
 
 const DB_NAME = "orbital-lofi";
 const STORE = "clips";
-const memory = new Map<string, GeneratedClip>();
+const memory = new Map<WorldId, GeneratedClip>();
 
 function openDb() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -18,7 +19,7 @@ function openDb() {
   });
 }
 
-export async function readClip(id: string) {
+export async function readClip(id: WorldId) {
   const cached = memory.get(id);
   if (cached) {
     return cached;
@@ -54,7 +55,7 @@ export async function readClip(id: string) {
   }
 }
 
-export async function writeClip(id: string, clip: GeneratedClip) {
+export async function writeClip(id: WorldId, clip: GeneratedClip) {
   memory.set(id, clip);
   try {
     const db = await openDb();

@@ -1,11 +1,5 @@
-import type { MusicStyle } from "@/audio/musicStyles";
-import {
-  createSampleBank,
-  env,
-  makeShaper,
-  midiToFreq,
-  type SampleBank,
-} from "@/audio/sampleBank";
+import type { MusicStyle } from "@/worlds/types";
+import { createSampleBank, env, makeShaper, midiToFreq } from "@/audio/sampleBank";
 
 const LOOKAHEAD = 0.3;
 const TIMER_MS = 25;
@@ -51,7 +45,7 @@ export async function createProceduralEngine(
   context: AudioContext,
   destination: AudioNode,
 ) {
-  const bank: SampleBank = await createSampleBank(context.sampleRate);
+  const bank = await createSampleBank(context.sampleRate);
 
   const dry = context.createGain();
   const tape = makeShaper(context, 1.7);
@@ -108,14 +102,9 @@ export async function createProceduralEngine(
   wow.connect(wowGain);
   wowGain.connect(tone.detune);
 
-  const keysBus = context.createGain();
-  keysBus.gain.value = 0.9;
-  keysBus.connect(dry);
-
   let vinylStarted = false;
   let wowStarted = false;
   let style: MusicStyle | null = null;
-  let pendingStyle: MusicStyle | null = null;
   let timer = 0;
   let step = 0;
   let nextTime = 0;
@@ -180,8 +169,8 @@ export async function createProceduralEngine(
       car.connect(gain);
       detune.connect(gain);
       hammer.connect(hammerGain);
-      gain.connect(keysBus);
-      hammerGain.connect(keysBus);
+      gain.connect(dry);
+      hammerGain.connect(dry);
       car.start(when);
       detune.start(when);
       mod.start(when);
@@ -213,25 +202,14 @@ export async function createProceduralEngine(
 
   const scheduleStep = (currentStyle: MusicStyle, currentStep: number, when: number) => {
     const barStep = currentStep % 16;
-    if (barStep === 0 && pendingStyle) {
-      style = pendingStyle;
-      pendingStyle = null;
-      tone.frequency.setTargetAtTime(
-        style.bpm > 74 ? 3600 : 2400,
-        when,
-        0.2,
-      );
-    }
-
-    const active = style ?? currentStyle;
-    const progression = PROGRESSIONS[active.seed % PROGRESSIONS.length] ?? PROGRESSIONS[0];
+    const progression = PROGRESSIONS[currentStyle.seed % PROGRESSIONS.length] ?? PROGRESSIONS[0];
     const chordIndex = Math.floor((currentStep % 64) / 16);
     const degree = progression[chordIndex] ?? 0;
-    const root = active.rootMidi + (MINOR[degree] ?? 0);
+    const root = currentStyle.rootMidi + (MINOR[degree] ?? 0);
     const ninth = root + 14;
-    const kickV = 0.86 + stepRand(active.seed, currentStep, 1) * 0.14;
+    const kickV = 0.86 + stepRand(currentStyle.seed, currentStep, 1) * 0.14;
 
-    if (barStep === 0 || (barStep === 8 && stepRand(active.seed, currentStep, 3) > 0.42)) {
+    if (barStep === 0 || (barStep === 8 && stepRand(currentStyle.seed, currentStep, 3) > 0.42)) {
       playKick(when, kickV);
     }
     if (barStep === 8) {
@@ -240,7 +218,7 @@ export async function createProceduralEngine(
         dry,
         bank.snare,
         when + 0.01,
-        0.38 + stepRand(active.seed, currentStep, 2) * 0.1,
+        0.38 + stepRand(currentStyle.seed, currentStep, 2) * 0.1,
         0.98,
       );
     }
@@ -252,23 +230,23 @@ export async function createProceduralEngine(
         open ? bank.openHat : bank.hat,
         when,
         open ? 0.16 : 0.11,
-        0.96 + stepRand(active.seed, currentStep, 7) * 0.08,
+        0.96 + stepRand(currentStyle.seed, currentStep, 7) * 0.08,
       );
     }
     if (barStep === 0 || barStep === 7 || barStep === 10 || barStep === 12) {
-      const walk = stepRand(active.seed, currentStep, 4) > 0.7 ? 7 : 0;
+      const walk = stepRand(currentStyle.seed, currentStep, 4) > 0.7 ? 7 : 0;
       playBass(when, root - 12 + walk, 0.92);
     }
     if (barStep === 0) {
       playChord(
         when,
         [root + 12, root + 15, root + 22, ninth + 12],
-        active.bpm > 74 ? 1.35 : 1.08,
+        currentStyle.bpm > 74 ? 1.35 : 1.08,
       );
     }
-    if (barStep % 4 === 0 && stepRand(active.seed, currentStep, 5) > 0.55) {
+    if (barStep % 4 === 0 && stepRand(currentStyle.seed, currentStep, 5) > 0.55) {
       const toneIndex = Math.floor(
-        stepRand(active.seed, currentStep, 6) * PENTATONIC.length,
+        stepRand(currentStyle.seed, currentStep, 6) * PENTATONIC.length,
       );
       playLead(when, root + 24 + (PENTATONIC[toneIndex] ?? 0));
     }
@@ -292,8 +270,9 @@ export async function createProceduralEngine(
 
   return {
     start(nextStyle: MusicStyle) {
+      window.clearInterval(timer);
+      running = false;
       style = nextStyle;
-      pendingStyle = null;
       tone.frequency.value = nextStyle.bpm > 74 ? 3600 : 2400;
       vinylGain.gain.setTargetAtTime(0.07, context.currentTime, 0.05);
       if (!vinylStarted) {
@@ -307,12 +286,8 @@ export async function createProceduralEngine(
       running = true;
       step = 0;
       nextTime = context.currentTime + 0.04;
-      window.clearInterval(timer);
       tick();
       timer = window.setInterval(tick, TIMER_MS);
-    },
-    setStyle(nextStyle: MusicStyle) {
-      pendingStyle = nextStyle;
     },
     stop() {
       running = false;

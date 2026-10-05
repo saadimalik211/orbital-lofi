@@ -2,14 +2,20 @@
 
 import { useEffect, useRef } from "react";
 import { createBackdropRenderer } from "@/backdrops/createBackdropRenderer";
-import type { WorldBackdropId } from "@/worlds/types";
+import type { WorldId } from "@/worlds/types";
 
 type WorldBackdropProps = {
-  backdrop: WorldBackdropId;
+  worldId: WorldId;
+  onReady?: () => void;
 };
 
-export function WorldBackdrop({ backdrop }: WorldBackdropProps) {
+export function WorldBackdrop({ worldId, onReady }: WorldBackdropProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const onReadyRef = useRef(onReady);
+
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -18,11 +24,14 @@ export function WorldBackdrop({ backdrop }: WorldBackdropProps) {
     }
 
     try {
-      return createBackdropRenderer(canvas, backdrop);
+      return createBackdropRenderer(canvas, worldId, () => {
+        onReadyRef.current?.();
+      });
     } catch {
+      onReadyRef.current?.();
       return;
     }
-  }, [backdrop]);
+  }, [worldId]);
 
   return (
     <canvas

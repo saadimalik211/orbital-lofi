@@ -5,45 +5,15 @@ export type GeneratedClip = {
   sampleRate: number;
 };
 
-type PendingRequest = {
-  resolve: (clip: GeneratedClip | null) => void;
+type Pending<T> = {
+  resolve: (value: T) => void;
   reject: (error: Error) => void;
   onStatus?: (status: MusicgenStatus) => void;
 };
 
 let worker: Worker | null = null;
 let nextRequestId = 0;
-const pending = new Map<number, PendingRequest>();
-
-function handleMessage(event: MessageEvent<MusicgenOutgoingMessage>) {
-  const message = event.data;
-  const request = pending.get(message.id);
-  if (!request) {
-    return;
-  }
-
-  if (message.type === "status") {
-    request.onStatus?.(message.status);
-    return;
-  }
-
-  pending.delete(message.id);
-
-  if (message.type === "error") {
-    request.reject(new Error(message.message));
-    return;
-  }
-
-  if (message.type === "ready") {
-    request.resolve(null);
-    return;
-  }
-
-  request.resolve({
-    samples: message.samples,
-    sampleRate: message.sampleRate,
-  });
-}
+const pending = new Map<number, Pending<GeneratedClip | void>>();
 
 function getWorker() {
   if (worker) {
@@ -53,7 +23,30 @@ function getWorker() {
   worker = new Worker(new URL("./musicgen.worker.ts", import.meta.url), {
     type: "module",
   });
-  worker.onmessage = handleMessage;
+  worker.onmessage = (event: MessageEvent<MusicgenOutgoingMessage>) => {
+    const message = event.data;
+    const request = pending.get(message.id);
+    if (!request) {
+      return;
+    }
+    if (message.type === "status") {
+      request.onStatus?.(message.status);
+      return;
+    }
+    pending.delete(message.id);
+    if (message.type === "error") {
+      request.reject(new Error(message.message));
+      return;
+    }
+    if (message.type === "ready") {
+      request.resolve();
+      return;
+    }
+    request.resolve({
+      samples: message.samples,
+      sampleRate: message.sampleRate,
+    });
+  };
   worker.onerror = (event) => {
     const error = new Error(event.message || "MusicGen worker failed");
     for (const [id, request] of pending) {
@@ -65,37 +58,24 @@ function getWorker() {
   return worker;
 }
 
-export function warmupMusicgen(onStatus?: (status: MusicgenStatus) => void) {
+function send<T>(
+  payload: { type: "warmup" } | { type: "generate"; prompt: string },
+  onStatus?: (status: MusicgenStatus) => void,
+) {
   const id = (nextRequestId += 1);
-  getWorker().postMessage({ type: "warmup", id });
-
-  return new Promise<void>((resolve, reject) => {
-    pending.set(id, {
-      resolve: () => resolve(),
-      reject,
-      onStatus,
-    });
+  getWorker().postMessage({ ...payload, id });
+  return new Promise<T>((resolve, reject) => {
+    pending.set(id, { resolve: resolve as (value: GeneratedClip | void) => void, reject, onStatus });
   });
+}
+
+export function warmupMusicgen(onStatus?: (status: MusicgenStatus) => void) {
+  return send<void>({ type: "warmup" }, onStatus);
 }
 
 export function generateMusicClip(
   prompt: string,
   onStatus?: (status: MusicgenStatus) => void,
 ) {
-  const id = (nextRequestId += 1);
-  getWorker().postMessage({ type: "generate", id, prompt });
-
-  return new Promise<GeneratedClip>((resolve, reject) => {
-    pending.set(id, {
-      resolve: (clip) => {
-        if (!clip) {
-          reject(new Error("No clip returned"));
-          return;
-        }
-        resolve(clip);
-      },
-      reject,
-      onStatus,
-    });
-  });
+  return send<GeneratedClip>({ type: "generate", prompt }, onStatus);
 }

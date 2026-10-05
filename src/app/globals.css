@@ -18,25 +18,511 @@ body {
   color: var(--foreground);
 }
 
+.hud-shell {
+  opacity: 1;
+  transition: opacity 420ms ease;
+}
+
+.hud-shell-idle {
+  opacity: 0.34;
+}
+
+.hud-shell-off {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.hud-reveal {
+  opacity: 0.82;
+  transition: opacity 420ms ease, color 180ms ease;
+}
+
+.hud-reveal-idle {
+  opacity: 0.28;
+}
+
+.hud-btn {
+  min-height: 2.75rem;
+  padding-inline: 0.15rem;
+  color: #d8fff0;
+  transition: color 160ms ease, opacity 160ms ease;
+}
+
+.hud-btn:hover {
+  color: #f2fff9;
+  opacity: 0.92;
+}
+
+.hud-btn:active {
+  opacity: 0.7;
+}
+
+.hud-btn-quiet {
+  color: #8fb8a5;
+}
+
+.hud-btn:focus-visible,
+.hud-reveal:focus-visible,
+.hud-mute:focus-visible {
+  outline: 1px solid rgba(216, 255, 240, 0.55);
+  outline-offset: 3px;
+}
+
 .hud-slider {
   appearance: none;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+  transition: opacity 160ms ease;
+}
+
+.hud-slider:hover {
+  opacity: 0.92;
+}
+
+.hud-slider:focus-visible {
+  outline: 1px solid rgba(216, 255, 240, 0.55);
+  outline-offset: 3px;
+}
+
+.hud-slider::-webkit-slider-runnable-track {
   height: 1px;
   background: rgba(143, 184, 165, 0.45);
-  outline: none;
 }
 
 .hud-slider::-webkit-slider-thumb {
   appearance: none;
   width: 7px;
   height: 14px;
+  margin-top: -6.5px;
   background: #d8fff0;
   cursor: pointer;
+  transition: background-color 160ms ease, transform 160ms ease;
+}
+
+.hud-slider:hover::-webkit-slider-thumb,
+.hud-slider:active::-webkit-slider-thumb {
+  background: #f4fff9;
+}
+
+.hud-slider::-moz-range-track {
+  height: 1px;
+  background: rgba(143, 184, 165, 0.45);
 }
 
 .hud-slider::-moz-range-thumb {
   width: 7px;
   height: 14px;
   border: 0;
+  border-radius: 0;
   background: #d8fff0;
   cursor: pointer;
+}
+
+.hud-mute {
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+  transition: color 160ms ease, opacity 160ms ease;
+}
+
+.hud-mute:hover {
+  opacity: 0.85;
+}
+
+@media (min-width: 640px) {
+  .hud-btn {
+    min-height: 1.75rem;
+  }
+
+  .hud-mute {
+    min-height: 1.75rem;
+    min-width: 2rem;
+  }
+}
+
+.world-cover {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: #000;
+  opacity: 0;
+  transition: opacity 550ms ease-in-out;
+}
+
+.world-cover-on {
+  opacity: 1;
+}
+
+.env-layer,
+.env-canvas,
+.env-fog,
+.env-flicker {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+}
+
+.env-layer {
+  z-index: 1;
+}
+
+.env-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.env-fog {
+  inset: -18%;
+  background:
+    radial-gradient(ellipse 55% 42% at 18% 78%, rgba(186, 210, 214, 0.16), transparent 68%),
+    radial-gradient(ellipse 48% 38% at 82% 28%, rgba(168, 196, 204, 0.1), transparent 70%);
+  animation: env-fog-drift 52s ease-in-out infinite alternate;
+}
+
+.env-fog-still {
+  animation: none;
+}
+
+.env-flicker {
+  opacity: 0;
+}
+
+.env-flicker-screen {
+  background: rgba(214, 236, 228, 0.7);
+  animation: env-flicker-screen 8.5s ease-in-out infinite;
+}
+
+.env-flicker-neon {
+  background: linear-gradient(
+    120deg,
+    rgba(80, 220, 255, 0.18),
+    transparent 42%,
+    rgba(255, 70, 180, 0.14) 78%,
+    transparent
+  );
+  animation: env-flicker-neon 11s ease-in-out infinite;
+}
+
+@keyframes env-fog-drift {
+  from {
+    transform: translate3d(-1.6%, 0.8%, 0);
+  }
+  to {
+    transform: translate3d(2.2%, -1.2%, 0);
+  }
+}
+
+@keyframes env-flicker-screen {
+  0%,
+  84%,
+  100% {
+    opacity: 0;
+  }
+  86% {
+    opacity: var(--env-flicker, 0.04);
+  }
+  88% {
+    opacity: 0;
+  }
+  90% {
+    opacity: calc(var(--env-flicker, 0.04) * 0.45);
+  }
+}
+
+@keyframes env-flicker-neon {
+  0%,
+  78%,
+  100% {
+    opacity: 0;
+  }
+  80% {
+    opacity: var(--env-flicker, 0.05);
+  }
+  82% {
+    opacity: 0;
+  }
+  93% {
+    opacity: calc(var(--env-flicker, 0.05) * 0.35);
+  }
+}
+
+.evt-layer {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+}
+
+.evt-flyby {
+  position: absolute;
+  left: 0;
+  opacity: 0;
+  will-change: transform, opacity;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+.evt-flyby-ltr {
+  animation-name: evt-fly-ltr;
+}
+
+.evt-flyby-rtl {
+  animation-name: evt-fly-rtl;
+}
+
+.evt-flyby-rtl .evt-craft,
+.evt-flyby-rtl .evt-flyby-img {
+  transform: scaleX(-1);
+}
+
+.evt-flyby-img {
+  display: block;
+  width: 140px;
+  height: auto;
+  opacity: 0.85;
+}
+
+.evt-craft {
+  position: relative;
+  width: 120px;
+  height: 14px;
+  border-radius: 46% 60% 30% 30% / 70% 70% 30% 30%;
+  background: linear-gradient(180deg, rgba(22, 30, 34, 0.92), rgba(6, 9, 11, 0.95));
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.evt-craft::before {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 14px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: rgb(var(--evt-light));
+  box-shadow: 0 0 6px rgba(var(--evt-light), 0.9);
+  animation: evt-running-light 1.6s steps(2, jump-none) infinite;
+}
+
+.evt-craft::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: -18px;
+  width: 22px;
+  height: 6px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at right, rgba(var(--evt-light), 0.55), transparent 70%);
+}
+
+.evt-streak {
+  position: absolute;
+  width: 18vw;
+  height: 1px;
+  opacity: 0;
+  background: linear-gradient(90deg, transparent, rgba(225, 238, 255, 0.85));
+  transform-origin: right center;
+  animation-name: evt-streak;
+  animation-timing-function: ease-out;
+  animation-fill-mode: forwards;
+}
+
+.evt-pulse {
+  position: absolute;
+  width: var(--evt-size);
+  height: var(--evt-size);
+  border-radius: 50%;
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(
+    circle,
+    rgba(var(--evt-rgb), var(--evt-peak)) 0%,
+    rgba(var(--evt-rgb), calc(var(--evt-peak) * 0.35)) 35%,
+    rgba(var(--evt-rgb), 0) 70%
+  );
+  animation-fill-mode: forwards;
+}
+
+.evt-pulse-beacon {
+  animation-name: evt-pulse-beacon;
+  animation-timing-function: ease-in-out;
+}
+
+.evt-pulse-glitch {
+  animation-name: evt-pulse-glitch;
+  animation-timing-function: steps(1, end);
+}
+
+.evt-pulse-flash {
+  animation-name: evt-pulse-flash;
+  animation-timing-function: ease-out;
+}
+
+.evt-pulse-calm {
+  animation-name: evt-pulse-calm;
+  animation-timing-function: ease-in-out;
+}
+
+@keyframes evt-fly-ltr {
+  0% {
+    opacity: 0;
+    transform: translate3d(-18vw, 0, 0) scale(var(--evt-scale));
+  }
+  8%,
+  92% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(118vw, -1.5vh, 0) scale(var(--evt-scale));
+  }
+}
+
+@keyframes evt-fly-rtl {
+  0% {
+    opacity: 0;
+    transform: translate3d(118vw, 0, 0) scale(var(--evt-scale));
+  }
+  8%,
+  92% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-18vw, -1.5vh, 0) scale(var(--evt-scale));
+  }
+}
+
+@keyframes evt-running-light {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.2;
+  }
+}
+
+@keyframes evt-streak {
+  0% {
+    opacity: 0;
+    transform: rotate(var(--evt-angle)) translate3d(0, 0, 0);
+  }
+  15% {
+    opacity: 0.8;
+  }
+  100% {
+    opacity: 0;
+    transform: rotate(var(--evt-angle)) translate3d(22vw, 0, 0);
+  }
+}
+
+@keyframes evt-pulse-beacon {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  18%,
+  30% {
+    opacity: 1;
+  }
+  44% {
+    opacity: 0;
+  }
+  62%,
+  74% {
+    opacity: 0.85;
+  }
+  90% {
+    opacity: 0;
+  }
+}
+
+@keyframes evt-pulse-glitch {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  12% {
+    opacity: 0.9;
+  }
+  18% {
+    opacity: 0.2;
+  }
+  26% {
+    opacity: 0.8;
+  }
+  32% {
+    opacity: 0;
+  }
+  58% {
+    opacity: 0.6;
+  }
+  64% {
+    opacity: 0;
+  }
+}
+
+@keyframes evt-pulse-flash {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  6% {
+    opacity: 1;
+  }
+  16% {
+    opacity: 0.15;
+  }
+  24% {
+    opacity: 0.7;
+  }
+  60% {
+    opacity: 0;
+  }
+}
+
+@keyframes evt-pulse-calm {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .evt-flyby,
+  .evt-streak,
+  .evt-craft::before {
+    animation: none;
+    opacity: 0;
+  }
+
+  .evt-pulse-beacon,
+  .evt-pulse-glitch,
+  .evt-pulse-flash {
+    animation-name: evt-pulse-calm;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-shell,
+  .hud-reveal,
+  .hud-btn,
+  .hud-slider,
+  .hud-slider::-webkit-slider-thumb,
+  .hud-mute,
+  .world-cover,
+  .env-fog,
+  .env-flicker-screen,
+  .env-flicker-neon {
+    animation: none;
+    transition: none;
+  }
 }

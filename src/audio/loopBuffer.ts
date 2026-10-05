@@ -19,7 +19,6 @@ export function startLoopingBuffer(
   context: AudioContext,
   destination: AudioNode,
   buffer: AudioBuffer,
-  fadeInSeconds = FADE_SECONDS,
 ): LoopHandle {
   const source = context.createBufferSource();
   const fade = context.createGain();
@@ -30,8 +29,7 @@ export function startLoopingBuffer(
   fade.connect(destination);
 
   const now = context.currentTime;
-  fade.gain.setValueAtTime(0, now);
-  fade.gain.linearRampToValueAtTime(1, now + fadeInSeconds);
+  fade.gain.value = 1;
   source.start(now);
 
   return {
@@ -45,6 +43,10 @@ export function startLoopingBuffer(
       } catch {
         // already stopped
       }
+      source.onended = () => {
+        source.disconnect();
+        fade.disconnect();
+      };
     },
   };
 }

@@ -1,16 +1,25 @@
+import { AmbienceMixer } from "@/components/AmbienceMixer";
 import { WorldSelector } from "@/components/WorldSelector";
 import type { AudioEngineStatus } from "@/audio/useAudioEngine";
-import type { World } from "@/worlds/types";
+import type { World, WorldId } from "@/worlds/types";
 
 type HudProps = {
   world: World;
   worlds: World[];
+  selectedWorldId?: WorldId;
   isPlaying: boolean;
   status: AudioEngineStatus;
   volume: number;
-  onSelectWorld: (worldId: string) => void;
+  visible: boolean;
+  idle: boolean;
+  onSelectWorld: (worldId: WorldId) => void;
   onTogglePlayback: () => void;
   onVolumeChange: (volume: number) => void;
+  onToggleHud: () => void;
+  ambienceVolumes: Record<string, number>;
+  ambienceMuted: Record<string, boolean>;
+  onAmbienceVolumeChange: (trackId: string, volume: number) => void;
+  onAmbienceMuteToggle: (trackId: string, defaultVolume: number) => void;
 };
 
 function statusLabel(status: AudioEngineStatus, isPlaying: boolean) {
@@ -35,63 +44,103 @@ function statusLabel(status: AudioEngineStatus, isPlaying: boolean) {
 export function Hud({
   world,
   worlds,
+  selectedWorldId,
   isPlaying,
   status,
   volume,
+  visible,
+  idle,
   onSelectWorld,
   onTogglePlayback,
   onVolumeChange,
+  onToggleHud,
+  ambienceVolumes,
+  ambienceMuted,
+  onAmbienceVolumeChange,
+  onAmbienceMuteToggle,
 }: HudProps) {
+  const shellClass = `hud-shell pointer-events-none absolute inset-0 z-10 flex flex-col justify-between p-4 pb-[max(4.5rem,env(safe-area-inset-bottom))] text-[#c9eadb] sm:p-8 sm:pb-16${
+    visible ? "" : " hud-shell-off"
+  }${idle && visible ? " hud-shell-idle" : ""}`;
+
   return (
-    <div className="pointer-events-none absolute inset-0 z-10 flex flex-col justify-between p-5 pb-16 text-[#c9eadb] sm:p-8 sm:pb-16">
-      <header className="pointer-events-auto flex items-start justify-between gap-4">
-        <div>
-          <p className="font-mono text-[10px] tracking-[0.42em] text-[#7f9a8e] uppercase">
-            Orbital Lofi
+    <>
+      <div className={shellClass} aria-hidden={visible ? undefined : true}>
+        <header className="pointer-events-auto flex items-start justify-between gap-4 pr-16 sm:pr-20">
+          <div className="min-w-0">
+            <p className="font-mono text-[10px] tracking-[0.42em] text-[#7f9a8e] uppercase">
+              Orbital Lofi
+            </p>
+            <h1 className="mt-2 font-mono text-base tracking-[0.16em] text-[#e7fff4] uppercase sm:mt-3 sm:text-2xl sm:tracking-[0.18em]">
+              {world.name}
+            </h1>
+            <p className="mt-1 font-mono text-[11px] tracking-[0.28em] text-[#8fb8a5] sm:text-xs sm:tracking-[0.32em]">
+              YEAR {world.year}
+            </p>
+          </div>
+          <p className="shrink-0 pt-1 font-mono text-[10px] tracking-[0.24em] text-[#6f8f80] uppercase sm:tracking-[0.28em]">
+            {statusLabel(status, isPlaying)}
           </p>
-          <h1 className="mt-3 font-mono text-lg tracking-[0.18em] text-[#e7fff4] uppercase sm:text-2xl">
-            {world.name}
-          </h1>
-          <p className="mt-1 font-mono text-xs tracking-[0.32em] text-[#8fb8a5]">
-            YEAR {world.year}
-          </p>
-        </div>
-        <p className="font-mono text-[10px] tracking-[0.28em] text-[#6f8f80] uppercase">
-          {statusLabel(status, isPlaying)}
-        </p>
-      </header>
+        </header>
 
-      <footer className="pointer-events-auto flex flex-col gap-5">
-        <div className="flex flex-wrap items-center gap-5">
-          <button
-            type="button"
-            onClick={onTogglePlayback}
-            className="font-mono text-[11px] tracking-[0.28em] text-[#d8fff0] uppercase"
-          >
-            {isPlaying ? "Pause" : "Play"}
-          </button>
+        <footer className="pointer-events-auto flex max-w-full flex-col gap-4 sm:gap-5">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <button
+              type="button"
+              onClick={onTogglePlayback}
+              className={`hud-btn px-1 font-mono text-[11px] tracking-[0.28em] uppercase ${
+                isPlaying ? "" : "hud-btn-quiet"
+              }`}
+            >
+              {isPlaying ? "Pause" : "Play"}
+            </button>
 
-          <label className="flex items-center gap-3 font-mono text-[10px] tracking-[0.24em] text-[#7f9a8e] uppercase">
-            Vol
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={volume}
-              onChange={(event) => onVolumeChange(Number(event.target.value))}
-              aria-label="Master volume"
-              className="hud-slider w-28 sm:w-36"
-            />
-          </label>
-        </div>
+            <label
+              className={`flex min-h-11 items-center gap-3 font-mono text-[10px] tracking-[0.24em] uppercase ${
+                volume === 0 ? "text-[#6f8f80]" : "text-[#7f9a8e]"
+              }`}
+            >
+              Vol
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={volume}
+                onChange={(event) => onVolumeChange(Number(event.target.value))}
+                aria-label="Master volume"
+                className="hud-slider w-28 sm:w-36"
+              />
+            </label>
+          </div>
 
-        <WorldSelector
-          worlds={worlds}
-          selectedWorldId={world.id}
-          onSelect={onSelectWorld}
-        />
-      </footer>
-    </div>
+          <AmbienceMixer
+            tracks={world.ambience}
+            volumes={ambienceVolumes}
+            muted={ambienceMuted}
+            onVolumeChange={onAmbienceVolumeChange}
+            onToggleMute={onAmbienceMuteToggle}
+          />
+
+          <WorldSelector
+            worlds={worlds}
+            selectedWorldId={selectedWorldId ?? world.id}
+            onSelect={onSelectWorld}
+          />
+        </footer>
+      </div>
+
+      <button
+        type="button"
+        onClick={onToggleHud}
+        aria-pressed={visible}
+        aria-label={visible ? "Hide interface" : "Show interface"}
+        className={`hud-reveal pointer-events-auto absolute top-4 right-4 z-20 min-h-11 px-1 font-mono text-[10px] tracking-[0.32em] text-[#9ecbb6] uppercase sm:top-8 sm:right-8 ${
+          idle ? "hud-reveal-idle" : ""
+        }`}
+      >
+        HUD
+      </button>
+    </>
   );
 }

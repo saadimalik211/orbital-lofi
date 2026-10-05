@@ -2,7 +2,7 @@ import {
   BACKDROP_SHADERS,
   BACKDROP_VERTEX_SHADER,
 } from "@/backdrops/shaders";
-import type { WorldBackdropId } from "@/worlds/types";
+import type { WorldId } from "@/worlds/types";
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string) {
   const shader = gl.createShader(type);
@@ -41,7 +41,8 @@ function createProgram(gl: WebGL2RenderingContext, fragmentSource: string) {
 
 export function createBackdropRenderer(
   canvas: HTMLCanvasElement,
-  backdrop: WorldBackdropId,
+  backdrop: WorldId,
+  onFirstFrame?: () => void,
 ) {
   const gl = canvas.getContext("webgl2", {
     alpha: false,
@@ -64,9 +65,13 @@ export function createBackdropRenderer(
     new Float32Array([-1, -1, 3, -1, -1, 3]),
     gl.STATIC_DRAW,
   );
+  gl.useProgram(program);
+  gl.enableVertexAttribArray(positionLoc);
+  gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
 
   let frame = 0;
   let running = true;
+  let announced = false;
   const startedAt = performance.now();
 
   const resize = () => {
@@ -85,13 +90,13 @@ export function createBackdropRenderer(
       return;
     }
     resize();
-    gl.useProgram(program);
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.enableVertexAttribArray(positionLoc);
-    gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
     gl.uniform2f(resolutionLoc, canvas.width, canvas.height);
     gl.uniform1f(timeLoc, (now - startedAt) / 1000);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (!announced) {
+      announced = true;
+      onFirstFrame?.();
+    }
     frame = window.requestAnimationFrame(draw);
   };
 
