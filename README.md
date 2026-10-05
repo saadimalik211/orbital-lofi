@@ -1,6 +1,6 @@
 # Orbital Lofi
 
-A cinematic sci-fi ambient listening terminal. Each world is a WebGL shader scene with an
+A cinematic sci-fi ambient listening terminal. Each world is an image, video or WebGL shader scene with an
 instant procedural lofi bed, an in-browser MusicGen clip that crossfades in, looping
 ambience, canvas/CSS environmental effects and occasional random events.
 
@@ -22,6 +22,7 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
 | --- | --- |
 | `src/worlds/` | World config (`worlds.ts`), types, dev validator, `useWorldTransition` |
 | `src/components/WorldScene.tsx` | Composes the layers and wires hooks together |
+| `src/components/WorldBackdrop.tsx` | Renders the scene: image, video or shader |
 | `src/backdrops/` | WebGL shader scenes (`shaders.ts`) and their renderer |
 | `src/audio/` | Web Audio engine: procedural bed, MusicGen worker, ambience, event sounds |
 | `src/effects/` | Rain / stars / particles canvas + CSS fog and flicker |
@@ -37,6 +38,7 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
 
    ```
    public/worlds/ice-moon/
+     scene/      background still or video: ice-moon.png, loop.mp4 …
      ambience/   looping beds: wind.wav, generator.wav …
      events/     one-shot sounds and optional flyby art: crack.wav, probe.png …
    ```
@@ -46,9 +48,19 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
    a missing event sound stays silent, missing flyby art falls back to a CSS craft. In dev, the
    console logs one short `[orbital-lofi]` warning per missing file.
 
-3. **Choose a scene.** Set `scene.backdrop` to an existing shader id (`planet-orbit`,
-   `neon-skyline`), or add a new GLSL fragment shader to `BACKDROP_SHADERS` in
-   `src/backdrops/shaders.ts` and its id to `SceneBackdropId`. Worlds can share a backdrop.
+3. **Choose a scene.** One of:
+
+   - `{ type: "image", src: "/worlds/ice-moon/scene/ice-moon.png" }`: a still, served through
+     `next/image` (resized and re-encoded automatically), cropped to fill with `object-fit: cover`.
+   - `{ type: "video", src: "/worlds/ice-moon/scene/loop.mp4", poster?: "…" }`: muted,
+     looping, inline autoplay, also `object-fit: cover`.
+   - `{ type: "shader", backdrop: "neon-skyline" }`: a GLSL scene from `BACKDROP_SHADERS` in
+     `src/backdrops/shaders.ts` (`planet-orbit`, `neon-skyline`). Add new ones there and to
+     `SceneBackdropId`.
+
+   The transition cover lifts when the scene's first frame is ready (image loaded, video
+   frame decoded, shader drawn) or after a timeout. A missing file leaves the dark
+   background with effects and events still running.
 
 4. **Add the config** to the `worlds` array in `src/worlds/worlds.ts`:
 
@@ -57,7 +69,7 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      id: "ice-moon",
      name: "Ice Moon",
      year: 2203,
-     scene: { backdrop: "planet-orbit" },
+     scene: { type: "image", src: "/worlds/ice-moon/scene/ice-moon.png" },
      music: {
        prompt: "glacial ambient lofi, frozen moon base, soft bells, 70 bpm, looping instrumental",
        bed: { seed: 2203, bpm: 70, rootMidi: 55, swing: 0.55, brightness: 0.4, texture: 0.2 },

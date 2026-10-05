@@ -5,9 +5,13 @@ export type SceneBackdropId = "planet-orbit" | "neon-skyline";
 
 export type Rgb = readonly [number, number, number];
 
-export type SceneConfig = {
-  backdrop: SceneBackdropId;
-};
+/** What sits behind effects, events and the HUD. Media `src` lives in `public/worlds/<world-id>/scene/`. */
+export type SceneConfig =
+  | { type: "shader"; backdrop: SceneBackdropId }
+  | { type: "image"; src: string }
+  | { type: "video"; src: string; poster?: string };
+
+export type SceneType = SceneConfig["type"];
 
 export type MusicBed = {
   seed: number;

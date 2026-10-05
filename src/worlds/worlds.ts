@@ -2,7 +2,7 @@ import type { World, WorldId } from "./types";
 import { validateWorlds } from "./validateWorlds";
 
 /**
- * Assets live under `public/worlds/<world-id>/{ambience,events}/`.
+ * Assets live under `public/worlds/<world-id>/{scene,ambience,events}/`.
  * Any referenced file may be missing: that layer stays silent / falls back, nothing else breaks.
  */
 export const worlds: World[] = [
@@ -10,7 +10,7 @@ export const worlds: World[] = [
     id: "orbital-station",
     name: "Orbital Station",
     year: 2187,
-    scene: { backdrop: "planet-orbit" },
+    scene: { type: "image", src: "/worlds/orbital-station/scene/orbital-station.png" },
     music: {
       prompt:
         "restrained ambient electronic, deep space station drifting in orbit, warm analog pads, soft sub pulse, sparse electric piano, gentle tape hiss, 68 bpm, calm, spacious, looping instrumental",
@@ -96,7 +96,7 @@ export const worlds: World[] = [
     id: "neon-city",
     name: "Neon City",
     year: 2194,
-    scene: { backdrop: "neon-skyline" },
+    scene: { type: "image", src: "/worlds/neon-city/scene/neon-city.png" },
     music: {
       prompt:
         "dark rainy cyberpunk lofi, neon city at night, muffled dusty drums, deep warm bass, moody analog synth chords, 80 bpm, melancholic, looping instrumental",

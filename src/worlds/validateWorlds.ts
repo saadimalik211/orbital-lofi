@@ -21,6 +21,10 @@ export function validateWorlds(worlds: readonly World[]) {
     }
     seenWorlds.add(world.id);
 
+    if (world.scene.type !== "shader") {
+      checkSrc("scene", world.scene.src);
+    }
+
     const trackIds = new Set<string>();
     for (const track of world.ambience) {
       if (trackIds.has(track.id)) {

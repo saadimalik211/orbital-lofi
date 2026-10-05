@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { WorldId } from "@/worlds/types";
 
 const COVER_MS = 550;
-const REVEAL_FALLBACK_MS = 650;
+const DEFAULT_REVEAL_FALLBACK_MS = 650;
 
 /**
  * idle      → nothing in flight
@@ -20,6 +20,8 @@ type TransitionOptions = {
   onBegin: (worldId: WorldId) => void;
   /** The visible world was swapped while the screen is covered. */
   onSwap: (worldId: WorldId) => void;
+  /** Longest the cover stays up waiting for `sceneReady` after a swap. */
+  revealFallbackMs?: (worldId: WorldId) => number;
 };
 
 export function useWorldTransition({
@@ -27,6 +29,7 @@ export function useWorldTransition({
   initialWorldId,
   onBegin,
   onSwap,
+  revealFallbackMs,
 }: TransitionOptions) {
   const [visibleWorldId, setVisibleWorldId] = useState(initialWorldId);
   const [targetWorldId, setTargetWorldId] = useState(initialWorldId);
@@ -36,11 +39,11 @@ export function useWorldTransition({
   const targetRef = useRef(initialWorldId);
   const visibleRef = useRef(initialWorldId);
   const timerRef = useRef(0);
-  const callbacksRef = useRef({ onBegin, onSwap });
+  const callbacksRef = useRef({ onBegin, onSwap, revealFallbackMs });
 
   useEffect(() => {
-    callbacksRef.current = { onBegin, onSwap };
-  }, [onBegin, onSwap]);
+    callbacksRef.current = { onBegin, onSwap, revealFallbackMs };
+  }, [onBegin, onSwap, revealFallbackMs]);
 
   useEffect(() => () => window.clearTimeout(timerRef.current), []);
 
@@ -65,7 +68,9 @@ export function useWorldTransition({
       reveal();
       return;
     }
-    timerRef.current = window.setTimeout(reveal, REVEAL_FALLBACK_MS);
+    const fallbackMs =
+      callbacksRef.current.revealFallbackMs?.(next) ?? DEFAULT_REVEAL_FALLBACK_MS;
+    timerRef.current = window.setTimeout(reveal, fallbackMs);
   }, [reveal]);
 
   const requestWorld = useCallback(

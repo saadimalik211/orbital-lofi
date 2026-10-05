@@ -9,6 +9,10 @@ import { useHudInteraction } from "@/hud/useHudInteraction";
 import { useWorldTransition } from "@/worlds/useWorldTransition";
 import { defaultWorldId, getWorldById, worldIds, worlds } from "@/worlds/worlds";
 
+/** Max time the cover waits for a scene's first frame: shaders draw in a frame; media may need a fetch. */
+const SHADER_REVEAL_MS = 650;
+const MEDIA_REVEAL_MS = 2500;
+
 export function WorldScene() {
   const audio = useAudioEngine(getWorldById(defaultWorldId));
   const { beginWorldTransition, finishWorldTransition } = audio;
@@ -18,6 +22,8 @@ export function WorldScene() {
     initialWorldId: defaultWorldId,
     onBegin: (id) => beginWorldTransition(getWorldById(id)),
     onSwap: (id) => finishWorldTransition(getWorldById(id)),
+    revealFallbackMs: (id) =>
+      getWorldById(id).scene.type === "shader" ? SHADER_REVEAL_MS : MEDIA_REVEAL_MS,
   });
   const world = getWorldById(transition.visibleWorldId);
 
@@ -36,7 +42,7 @@ export function WorldScene() {
     >
       <WorldBackdrop
         key={world.id}
-        backdrop={world.scene.backdrop}
+        scene={world.scene}
         onReady={transition.sceneReady}
       />
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_20%,rgba(2,6,5,0.18)_70%,rgba(2,6,5,0.55)_100%)]" />
