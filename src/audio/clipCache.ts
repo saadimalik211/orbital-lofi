@@ -1,9 +1,18 @@
 import type { GeneratedClip } from "@/audio/musicgenClient";
-import type { WorldId } from "@/worlds/types";
 
 const DB_NAME = "orbital-lofi";
 const STORE = "clips";
-const memory = new Map<WorldId, GeneratedClip>();
+const memory = new Map<string, GeneratedClip>();
+
+type StoredClip = { samples: ArrayBuffer; sampleRate: number };
+
+function isStoredClip(value: unknown): value is StoredClip {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const clip = value as Partial<StoredClip>;
+  return clip.samples instanceof ArrayBuffer && typeof clip.sampleRate === "number";
+}
 
 function openDb() {
   return new Promise<IDBDatabase>((resolve, reject) => {
@@ -19,8 +28,8 @@ function openDb() {
   });
 }
 
-export async function readClip(id: WorldId) {
-  const cached = memory.get(id);
+export async function readClip(key: string) {
+  const cached = memory.get(key);
   if (cached) {
     return cached;
   }
@@ -29,12 +38,10 @@ export async function readClip(id: WorldId) {
     const db = await openDb();
     const clip = await new Promise<GeneratedClip | null>((resolve, reject) => {
       const tx = db.transaction(STORE, "readonly");
-      const request = tx.objectStore(STORE).get(id);
+      const request = tx.objectStore(STORE).get(key);
       request.onsuccess = () => {
-        const value = request.result as
-          | { samples: ArrayBuffer; sampleRate: number }
-          | undefined;
-        if (!value) {
+        const value: unknown = request.result;
+        if (!isStoredClip(value)) {
           resolve(null);
           return;
         }
@@ -47,7 +54,7 @@ export async function readClip(id: WorldId) {
     });
     db.close();
     if (clip) {
-      memory.set(id, clip);
+      memory.set(key, clip);
     }
     return clip;
   } catch {
@@ -55,8 +62,8 @@ export async function readClip(id: WorldId) {
   }
 }
 
-export async function writeClip(id: WorldId, clip: GeneratedClip) {
-  memory.set(id, clip);
+export async function writeClip(key: string, clip: GeneratedClip) {
+  memory.set(key, clip);
   try {
     const db = await openDb();
     await new Promise<void>((resolve, reject) => {
@@ -66,7 +73,7 @@ export async function writeClip(id: WorldId, clip: GeneratedClip) {
           samples: new Float32Array(clip.samples).buffer,
           sampleRate: clip.sampleRate,
         },
-        id,
+        key,
       );
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);

@@ -1,17 +1,16 @@
+import type { AmbiencePrefs } from "@/audio/ambiencePrefs";
 import type { AmbienceTrack } from "@/worlds/types";
 
 type AmbienceMixerProps = {
   tracks: AmbienceTrack[];
-  volumes: Record<string, number>;
-  muted: Record<string, boolean>;
+  prefs: AmbiencePrefs;
   onVolumeChange: (trackId: string, volume: number) => void;
-  onToggleMute: (trackId: string, defaultVolume: number) => void;
+  onToggleMute: (trackId: string) => void;
 };
 
 export function AmbienceMixer({
   tracks,
-  volumes,
-  muted,
+  prefs,
   onVolumeChange,
   onToggleMute,
 }: AmbienceMixerProps) {
@@ -22,8 +21,8 @@ export function AmbienceMixer({
   return (
     <div className="flex w-full max-w-md flex-col gap-1.5 sm:gap-2" aria-label="Ambience mixer">
       {tracks.map((track) => {
-        const volume = volumes[track.id] ?? track.defaultVolume;
-        const isMuted = Boolean(muted[track.id]);
+        const volume = prefs.volumes[track.id] ?? track.defaultVolume;
+        const isMuted = Boolean(prefs.muted[track.id]);
 
         return (
           <div key={track.id} className="flex min-w-0 items-center gap-2 sm:gap-3">
@@ -48,7 +47,7 @@ export function AmbienceMixer({
               type="button"
               aria-pressed={isMuted}
               aria-label={isMuted ? `Unmute ${track.name}` : `Mute ${track.name}`}
-              onClick={() => onToggleMute(track.id, track.defaultVolume)}
+              onClick={() => onToggleMute(track.id)}
               className={`hud-mute font-mono text-[9px] tracking-[0.18em] uppercase ${
                 isMuted ? "text-[#6f8f80]" : "text-[#d8fff0]"
               }`}

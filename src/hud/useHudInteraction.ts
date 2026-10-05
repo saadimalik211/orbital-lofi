@@ -28,56 +28,42 @@ export function useHudInteraction(actions: HudActions) {
 
   const actionsRef = useRef(actions);
   const idleRef = useRef(false);
-  const visibleRef = useRef(true);
   const pointerHeldRef = useRef(false);
   const idleTimerRef = useRef(0);
+  const wakeFrameRef = useRef(0);
 
   useEffect(() => {
     actionsRef.current = actions;
   }, [actions]);
 
-  const setIdleState = (next: boolean) => {
-    if (idleRef.current === next) {
-      return;
-    }
-    idleRef.current = next;
-    setIdle(next);
-  };
-
+  // While a pointer is held (e.g. dragging a slider) the timer is ignored; pointerup re-arms it.
   const armIdleTimer = useCallback(() => {
     window.clearTimeout(idleTimerRef.current);
     idleTimerRef.current = window.setTimeout(() => {
-      if (pointerHeldRef.current) {
-        armIdleTimer();
+      if (pointerHeldRef.current || idleRef.current) {
         return;
       }
-      setIdleState(true);
+      idleRef.current = true;
+      setIdle(true);
     }, IDLE_MS);
   }, []);
 
   const noteActivity = useCallback(() => {
     if (idleRef.current) {
       idleRef.current = false;
-      requestAnimationFrame(() => {
-        setIdle(false);
-      });
+      // Deferred so the wake-up render never lands between pointerdown and click.
+      window.cancelAnimationFrame(wakeFrameRef.current);
+      wakeFrameRef.current = window.requestAnimationFrame(() => setIdle(false));
     }
     armIdleTimer();
   }, [armIdleTimer]);
 
   const toggleHud = useCallback(() => {
-    setHudVisible((current) => {
-      const next = !current;
-      visibleRef.current = next;
-      return next;
-    });
-    setIdleState(false);
+    setHudVisible((current) => !current);
+    idleRef.current = false;
+    setIdle(false);
     armIdleTimer();
   }, [armIdleTimer]);
-
-  useEffect(() => {
-    visibleRef.current = hudVisible;
-  }, [hudVisible]);
 
   useEffect(() => {
     const onPointerMove = () => {
@@ -144,6 +130,7 @@ export function useHudInteraction(actions: HudActions) {
       window.removeEventListener("pointercancel", onPointerUp);
       window.removeEventListener("keydown", onKeyDown);
       window.clearTimeout(idleTimerRef.current);
+      window.cancelAnimationFrame(wakeFrameRef.current);
     };
   }, [armIdleTimer, noteActivity, toggleHud]);
 

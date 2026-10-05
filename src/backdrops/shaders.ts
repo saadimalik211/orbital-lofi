@@ -1,3 +1,5 @@
+import type { SceneBackdropId } from "@/worlds/types";
+
 const VERTEX = `#version 300 es
 in vec2 aPos;
 void main() {
@@ -115,9 +117,9 @@ void main() {
 }
 `;
 
-export const BACKDROP_SHADERS = {
-  "orbital-station": ORBITAL,
-  "neon-city": NEON,
-} as const;
+export const BACKDROP_SHADERS: Record<SceneBackdropId, string> = {
+  "planet-orbit": ORBITAL,
+  "neon-skyline": NEON,
+};
 
 export const BACKDROP_VERTEX_SHADER = VERTEX;

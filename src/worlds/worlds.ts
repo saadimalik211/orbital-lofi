@@ -1,75 +1,83 @@
 import type { World, WorldId } from "./types";
+import { validateWorlds } from "./validateWorlds";
 
+/**
+ * Assets live under `public/worlds/<world-id>/{ambience,events}/`.
+ * Any referenced file may be missing: that layer stays silent / falls back, nothing else breaks.
+ */
 export const worlds: World[] = [
   {
     id: "orbital-station",
     name: "Orbital Station",
     year: 2187,
-    musicPrompt:
-      "slow sci-fi lofi, orbital space station, muted electric piano, soft vinyl crackle, distant hum, 72 bpm, calm, looping instrumental",
-    music: { seed: 2187, bpm: 72, rootMidi: 57, swing: 0.58 },
+    scene: { backdrop: "planet-orbit" },
+    music: {
+      prompt:
+        "restrained ambient electronic, deep space station drifting in orbit, warm analog pads, soft sub pulse, sparse electric piano, gentle tape hiss, 68 bpm, calm, spacious, looping instrumental",
+      bed: { seed: 2187, bpm: 68, rootMidi: 57, swing: 0.54, brightness: 0.3, texture: 0.3 },
+    },
     ambience: [
       {
         id: "engine",
         name: "Engine Hum",
-        src: "/worlds/orbital/audio/engine.wav",
-        defaultVolume: 0.35,
+        src: "/worlds/orbital-station/ambience/engine.wav",
+        defaultVolume: 0.34,
       },
       {
         id: "vent",
         name: "Ventilation",
-        src: "/worlds/orbital/audio/vent.wav",
-        defaultVolume: 0.28,
+        src: "/worlds/orbital-station/ambience/vent.wav",
+        defaultVolume: 0.24,
       },
       {
         id: "radio",
         name: "Radio Chatter",
-        src: "/worlds/orbital/audio/radio.wav",
-        defaultVolume: 0.2,
+        src: "/worlds/orbital-station/ambience/radio.wav",
+        defaultVolume: 0.12,
       },
     ],
     effects: {
-      stars: { intensity: 0.32 },
-      fog: { intensity: 0.16 },
-      flicker: { intensity: 0.08, style: "screen" },
+      stars: { intensity: 0.22 },
+      fog: { intensity: 0.1 },
+      flicker: { intensity: 0.05, style: "screen" },
     },
     events: [
       {
         id: "shuttle-pass",
         type: "flyby",
-        asset: "/worlds/orbital/events/shuttle.png",
+        asset: "/worlds/orbital-station/events/shuttle.png",
         direction: "either",
         top: [14, 34],
         scale: 0.9,
-        lightColor: "150, 220, 255",
+        lightColor: [150, 220, 255],
         weight: 3,
-        minDelay: 25_000,
-        maxDelay: 70_000,
-        cooldown: 45_000,
-        duration: 11_000,
+        minDelay: 30_000,
+        maxDelay: 80_000,
+        cooldown: 60_000,
+        duration: 12_000,
       },
       {
         id: "docking-beacon",
         type: "pulse",
         pattern: "beacon",
-        color: "255, 120, 90",
+        color: [255, 120, 90],
         x: 78,
         y: 22,
         size: 18,
-        intensity: 0.5,
+        intensity: 0.45,
         weight: 3,
         minDelay: 20_000,
-        maxDelay: 55_000,
+        maxDelay: 50_000,
         duration: 2_400,
       },
       {
-        id: "station-announcement",
+        id: "docking-announcement",
         type: "sound",
-        sound: { src: "/worlds/orbital/events/announcement.wav", volume: 0.45 },
+        sound: { src: "/worlds/orbital-station/events/docking-announcement.wav", volume: 0.42 },
         weight: 2,
-        minDelay: 60_000,
-        maxDelay: 150_000,
-        cooldown: 120_000,
+        minDelay: 70_000,
+        maxDelay: 160_000,
+        cooldown: 150_000,
         duration: 5_000,
       },
       {
@@ -77,9 +85,9 @@ export const worlds: World[] = [
         type: "streak",
         angle: 24,
         weight: 1,
-        minDelay: 90_000,
-        maxDelay: 240_000,
-        cooldown: 180_000,
+        minDelay: 120_000,
+        maxDelay: 300_000,
+        cooldown: 240_000,
         duration: 1_400,
       },
     ],
@@ -88,54 +96,57 @@ export const worlds: World[] = [
     id: "neon-city",
     name: "Neon City",
     year: 2194,
-    musicPrompt:
-      "night neon city lofi, rainy cyberpunk streets, warm bass, dusty drums, analog synths, 78 bpm, mellow, looping instrumental",
-    music: { seed: 2194, bpm: 78, rootMidi: 50, swing: 0.56 },
+    scene: { backdrop: "neon-skyline" },
+    music: {
+      prompt:
+        "dark rainy cyberpunk lofi, neon city at night, muffled dusty drums, deep warm bass, moody analog synth chords, 80 bpm, melancholic, looping instrumental",
+      bed: { seed: 2194, bpm: 80, rootMidi: 50, swing: 0.6, brightness: 0.28, texture: 0.65 },
+    },
     ambience: [
       {
         id: "rain",
         name: "Rain",
-        src: "/worlds/neon/audio/rain.wav",
-        defaultVolume: 0.4,
+        src: "/worlds/neon-city/ambience/rain.wav",
+        defaultVolume: 0.46,
       },
       {
         id: "traffic",
-        name: "Traffic",
-        src: "/worlds/neon/audio/traffic.wav",
-        defaultVolume: 0.28,
+        name: "Distant Traffic",
+        src: "/worlds/neon-city/ambience/traffic.wav",
+        defaultVolume: 0.24,
       },
       {
         id: "crowd",
-        name: "Crowd Noise",
-        src: "/worlds/neon/audio/crowd.wav",
-        defaultVolume: 0.22,
+        name: "City Hum",
+        src: "/worlds/neon-city/ambience/crowd.wav",
+        defaultVolume: 0.18,
       },
     ],
     effects: {
-      rain: { intensity: 0.52 },
-      fog: { intensity: 0.2 },
-      flicker: { intensity: 0.1, style: "neon" },
+      rain: { intensity: 0.78 },
+      fog: { intensity: 0.24 },
+      flicker: { intensity: 0.12, style: "neon" },
     },
     events: [
       {
         id: "hovercar-pass",
         type: "flyby",
-        asset: "/worlds/neon/events/hovercar.png",
+        asset: "/worlds/neon-city/events/hovercar.png",
         direction: "either",
         top: [18, 42],
         scale: 0.7,
-        lightColor: "255, 90, 190",
+        lightColor: [255, 90, 190],
         weight: 4,
-        minDelay: 20_000,
-        maxDelay: 60_000,
-        cooldown: 30_000,
+        minDelay: 18_000,
+        maxDelay: 50_000,
+        cooldown: 25_000,
         duration: 8_000,
       },
       {
         id: "sign-glitch",
         type: "pulse",
         pattern: "glitch",
-        color: "80, 220, 255",
+        color: [80, 220, 255],
         x: 24,
         y: 30,
         size: 26,
@@ -148,31 +159,37 @@ export const worlds: World[] = [
       {
         id: "distant-siren",
         type: "sound",
-        sound: { src: "/worlds/neon/events/siren.wav", volume: 0.32 },
-        weight: 2,
-        minDelay: 60_000,
-        maxDelay: 180_000,
-        cooldown: 150_000,
+        sound: { src: "/worlds/neon-city/events/siren.wav", volume: 0.3 },
+        weight: 1,
+        minDelay: 90_000,
+        maxDelay: 240_000,
+        cooldown: 200_000,
         duration: 7_000,
       },
       {
         id: "distant-lightning",
         type: "pulse",
         pattern: "flash",
-        color: "200, 215, 255",
+        color: [200, 215, 255],
         x: 62,
         y: 8,
         size: 90,
         intensity: 0.2,
         weight: 1,
-        minDelay: 120_000,
-        maxDelay: 300_000,
-        cooldown: 240_000,
+        minDelay: 150_000,
+        maxDelay: 360_000,
+        cooldown: 300_000,
         duration: 1_600,
       },
     ],
   },
 ];
+
+if (process.env.NODE_ENV !== "production") {
+  validateWorlds(worlds);
+}
+
+export const worldIds: readonly WorldId[] = worlds.map((world) => world.id);
 
 export const defaultWorldId: WorldId = worlds[0].id;
 

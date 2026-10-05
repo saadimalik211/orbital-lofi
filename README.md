@@ -1,36 +1,92 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Orbital Lofi
 
-## Getting Started
+A cinematic sci-fi ambient listening terminal. Each world is a WebGL shader scene with an
+instant procedural lofi bed, an in-browser MusicGen clip that crossfades in, looping
+ambience, canvas/CSS environmental effects and occasional random events.
 
-First, run the development server:
+No backend: everything runs in the browser. Mixer levels persist in `localStorage`;
+generated clips are cached in IndexedDB.
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev     # http://localhost:3000
+npm run lint
+npm run build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previous/next world.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Project layout
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Path | Responsibility |
+| --- | --- |
+| `src/worlds/` | World config (`worlds.ts`), types, dev validator, `useWorldTransition` |
+| `src/components/WorldScene.tsx` | Composes the layers and wires hooks together |
+| `src/backdrops/` | WebGL shader scenes (`shaders.ts`) and their renderer |
+| `src/audio/` | Web Audio engine: procedural bed, MusicGen worker, ambience, event sounds |
+| `src/effects/` | Rain / stars / particles canvas + CSS fog and flicker |
+| `src/events/` | Event scheduler and event visuals |
+| `src/hud/`, `src/components/Hud.tsx` | HUD idle/visibility, keyboard shortcuts, controls |
 
-## Learn More
+## How to add a new world
 
-To learn more about Next.js, take a look at the following resources:
+1. **Pick an id.** Kebab-case, e.g. `ice-moon`. Add it to the `WorldId` union in
+   `src/worlds/types.ts`. The id is used for the asset folder and the music cache key.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+2. **Add assets** under `public/worlds/<world-id>/`:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+   ```
+   public/worlds/ice-moon/
+     ambience/   looping beds: wind.wav, generator.wav …
+     events/     one-shot sounds and optional flyby art: crack.wav, probe.png …
+   ```
 
-## Deploy on Vercel
+   Short, seamlessly looping `.wav`/`.ogg`/`.mp3` files work best for ambience. Use only
+   media you have the rights to. Every file is optional: a missing ambience track is skipped,
+   a missing event sound stays silent, missing flyby art falls back to a CSS craft. In dev, the
+   console logs one short `[orbital-lofi]` warning per missing file.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+3. **Choose a scene.** Set `scene.backdrop` to an existing shader id (`planet-orbit`,
+   `neon-skyline`), or add a new GLSL fragment shader to `BACKDROP_SHADERS` in
+   `src/backdrops/shaders.ts` and its id to `SceneBackdropId`. Worlds can share a backdrop.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+4. **Add the config** to the `worlds` array in `src/worlds/worlds.ts`:
+
+   ```ts
+   {
+     id: "ice-moon",
+     name: "Ice Moon",
+     year: 2203,
+     scene: { backdrop: "planet-orbit" },
+     music: {
+       prompt: "glacial ambient lofi, frozen moon base, soft bells, 70 bpm, looping instrumental",
+       bed: { seed: 2203, bpm: 70, rootMidi: 55, swing: 0.55, brightness: 0.4, texture: 0.2 },
+     },
+     ambience: [
+       { id: "wind", name: "Wind", src: "/worlds/ice-moon/ambience/wind.wav", defaultVolume: 0.3 },
+     ],
+     effects: { particles: { type: "snow", intensity: 0.5 }, fog: { intensity: 0.2 } },
+     events: [
+       { id: "ice-crack", type: "sound", sound: { src: "/worlds/ice-moon/events/crack.wav" },
+         weight: 1, minDelay: 60_000, maxDelay: 180_000, cooldown: 120_000, duration: 4_000 },
+     ],
+   }
+   ```
+
+   - **Music:** `prompt` drives MusicGen; `bed` is the instant procedural fallback.
+     `brightness` (0–1) opens the filter, `texture` (0–1) adds vinyl crackle. Changing the
+     prompt invalidates that world's cached clip automatically.
+   - **Ambience:** `id` keys the saved mixer level, so a `rain` track in two worlds shares one
+     level. Use a distinct id if it should be independent. `defaultVolume` is 0–1.
+   - **Effects:** each entry is optional; `intensity` is 0–1. Available: `rain`, `fog`,
+     `stars`, `particles` (`dust` | `snow` | `atmosphere`), `flicker` (`screen` | `neon`).
+   - **Events:** `flyby`, `streak`, `pulse` (`beacon` | `glitch` | `flash`) or `sound`.
+     Timing is in ms: the next event is scheduled `minDelay`–`maxDelay` after the previous one,
+     picked by `weight`, skipping events still in `cooldown`. Set `duration` to at least the
+     length of the event's sound. Colors are `[r, g, b]` tuples.
+
+5. **Check it.** `npm run dev` prints a single `World config issues` warning if ids collide,
+   delays are inverted, levels are out of range, or asset paths sit outside the world's folder.
+   In dev, the browser console exposes `orbitalEvents.list()` and
+   `orbitalEvents.trigger("ice-crack")` to fire events on demand. This helper isn't included
+   in production builds.

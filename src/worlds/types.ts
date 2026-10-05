@@ -1,10 +1,30 @@
 export type WorldId = "orbital-station" | "neon-city";
 
-export type MusicStyle = {
+/** Shader backdrops in `src/backdrops/shaders.ts`. Worlds may share one. */
+export type SceneBackdropId = "planet-orbit" | "neon-skyline";
+
+export type Rgb = readonly [number, number, number];
+
+export type SceneConfig = {
+  backdrop: SceneBackdropId;
+};
+
+export type MusicBed = {
   seed: number;
   bpm: number;
   rootMidi: number;
   swing: number;
+  /** 0–1: low-pass cutoff and chord voicing brightness. */
+  brightness: number;
+  /** 0–1: vinyl crackle level. */
+  texture: number;
+};
+
+export type WorldMusic = {
+  /** MusicGen text prompt for the generated clip. */
+  prompt: string;
+  /** Procedural bed that plays instantly while the clip renders. */
+  bed: MusicBed;
 };
 
 export type AmbienceTrack = {
@@ -47,7 +67,7 @@ export type FlybyEvent = EventTiming & {
   direction?: "ltr" | "rtl" | "either";
   top?: [number, number];
   scale?: number;
-  lightColor?: string;
+  lightColor?: Rgb;
 };
 
 export type StreakEvent = EventTiming & {
@@ -58,7 +78,7 @@ export type StreakEvent = EventTiming & {
 export type PulseEvent = EventTiming & {
   type: "pulse";
   pattern: "beacon" | "glitch" | "flash";
-  color: string;
+  color: Rgb;
   x: number;
   y: number;
   size?: number;
@@ -74,13 +94,13 @@ export type WorldEvent = FlybyEvent | StreakEvent | PulseEvent | SoundEvent;
 
 export type WorldEventType = WorldEvent["type"];
 
-export interface World {
+export type World = {
   id: WorldId;
   name: string;
   year: number;
-  musicPrompt: string;
-  music: MusicStyle;
+  scene: SceneConfig;
+  music: WorldMusic;
   ambience: AmbienceTrack[];
   effects: WorldEffects;
   events: WorldEvent[];
-}
+};

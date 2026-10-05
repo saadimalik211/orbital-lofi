@@ -2,7 +2,7 @@ import {
   BACKDROP_SHADERS,
   BACKDROP_VERTEX_SHADER,
 } from "@/backdrops/shaders";
-import type { WorldId } from "@/worlds/types";
+import type { SceneBackdropId } from "@/worlds/types";
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string) {
   const shader = gl.createShader(type);
@@ -41,7 +41,7 @@ function createProgram(gl: WebGL2RenderingContext, fragmentSource: string) {
 
 export function createBackdropRenderer(
   canvas: HTMLCanvasElement,
-  backdrop: WorldId,
+  backdrop: SceneBackdropId,
   onFirstFrame?: () => void,
 ) {
   const gl = canvas.getContext("webgl2", {

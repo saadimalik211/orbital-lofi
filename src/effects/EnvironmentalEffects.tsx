@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, type CSSProperties } from "react";
+import { useEffect, useRef } from "react";
 import { createEffectsRenderer } from "@/effects/createEffectsRenderer";
 import { useReducedMotion } from "@/effects/useReducedMotion";
+import type { StyleWithVars } from "@/lib/styleVars";
 import type { WorldEffects } from "@/worlds/types";
 
 type EnvironmentalEffectsProps = {
@@ -15,6 +16,7 @@ export function EnvironmentalEffects({ effects }: EnvironmentalEffectsProps) {
   const fog = effects.fog?.intensity ?? 0;
   const flicker = effects.flicker?.intensity ?? 0;
   const flickerStyle = effects.flicker?.style ?? "screen";
+  const flickerVars: StyleWithVars = { "--env-flicker": String(0.035 + flicker * 0.06) };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -36,7 +38,7 @@ export function EnvironmentalEffects({ effects }: EnvironmentalEffectsProps) {
       {flicker > 0 && !reducedMotion ? (
         <div
           className={`env-flicker env-flicker-${flickerStyle}`}
-          style={{ ["--env-flicker"]: String(0.035 + flicker * 0.06) } as CSSProperties}
+          style={flickerVars}
         />
       ) : null}
     </div>

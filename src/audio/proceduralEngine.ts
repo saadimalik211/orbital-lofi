@@ -1,4 +1,4 @@
-import type { MusicStyle } from "@/worlds/types";
+import type { MusicBed } from "@/worlds/types";
 import { createSampleBank, env, makeShaper, midiToFreq } from "@/audio/sampleBank";
 
 const LOOKAHEAD = 0.3;
@@ -15,6 +15,10 @@ function rand(seed: number) {
   const t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
   const n = t + Math.imul(t ^ (t >>> 7), 61 | t);
   return ((n ^ (n >>> 14)) >>> 0) / 4294967296;
+}
+
+function clamp01(value: number) {
+  return Math.min(1, Math.max(0, value));
 }
 
 function stepRand(seed: number, step: number, lane: number) {
@@ -104,7 +108,7 @@ export async function createProceduralEngine(
 
   let vinylStarted = false;
   let wowStarted = false;
-  let style: MusicStyle | null = null;
+  let style: MusicBed | null = null;
   let timer = 0;
   let step = 0;
   let nextTime = 0;
@@ -200,7 +204,7 @@ export async function createProceduralEngine(
     osc2.stop(when + 0.7);
   };
 
-  const scheduleStep = (currentStyle: MusicStyle, currentStep: number, when: number) => {
+  const scheduleStep = (currentStyle: MusicBed, currentStep: number, when: number) => {
     const barStep = currentStep % 16;
     const progression = PROGRESSIONS[currentStyle.seed % PROGRESSIONS.length] ?? PROGRESSIONS[0];
     const chordIndex = Math.floor((currentStep % 64) / 16);
@@ -241,7 +245,7 @@ export async function createProceduralEngine(
       playChord(
         when,
         [root + 12, root + 15, root + 22, ninth + 12],
-        currentStyle.bpm > 74 ? 1.35 : 1.08,
+        0.9 + clamp01(currentStyle.brightness) * 0.75,
       );
     }
     if (barStep % 4 === 0 && stepRand(currentStyle.seed, currentStep, 5) > 0.55) {
@@ -269,12 +273,16 @@ export async function createProceduralEngine(
   };
 
   return {
-    start(nextStyle: MusicStyle) {
+    start(nextStyle: MusicBed) {
       window.clearInterval(timer);
       running = false;
       style = nextStyle;
-      tone.frequency.value = nextStyle.bpm > 74 ? 3600 : 2400;
-      vinylGain.gain.setTargetAtTime(0.07, context.currentTime, 0.05);
+      tone.frequency.value = 1800 + clamp01(nextStyle.brightness) * 3000;
+      vinylGain.gain.setTargetAtTime(
+        0.02 + clamp01(nextStyle.texture) * 0.1,
+        context.currentTime,
+        0.05,
+      );
       if (!vinylStarted) {
         vinylSource.start();
         vinylStarted = true;

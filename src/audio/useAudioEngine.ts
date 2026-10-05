@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { readClip, writeClip } from "@/audio/clipCache";
 import {
   pcmToAudioBuffer,
@@ -13,21 +19,25 @@ import {
   type GeneratedClip,
 } from "@/audio/musicgenClient";
 import {
-  loadAmbienceBuffer,
+  loadAudioBuffer,
   preloadWorldAmbience,
   startAmbienceVoice,
   stopAmbienceVoices,
   type AmbienceVoice,
 } from "@/audio/ambienceEngine";
 import {
-  loadAmbiencePrefs,
-  saveAmbiencePrefs,
+  ambienceLevel,
+  clampVolume,
+  getAmbiencePrefs,
+  getServerAmbiencePrefs,
+  subscribeAmbiencePrefs,
+  updateAmbiencePrefs,
 } from "@/audio/ambiencePrefs";
 import {
   createProceduralEngine,
   type ProceduralEngine,
 } from "@/audio/proceduralEngine";
-import type { AmbienceTrack, World } from "@/worlds/types";
+import type { World, WorldId } from "@/worlds/types";
 
 export type AudioEngineStatus =
   | "idle"
@@ -37,6 +47,45 @@ export type AudioEngineStatus =
   | "ready"
   | "error";
 
+const DEFAULT_VOLUME = 0.55;
+const TRANSITION_FADE_S = 0.55;
+const isDev = process.env.NODE_ENV !== "production";
+
+/**
+ * bed / clip / ambience / event sounds → master (user volume) → output (transition fade) → speakers
+ */
+type AudioGraph = {
+  context: AudioContext;
+  master: GainNode;
+  output: GainNode;
+  bed: GainNode;
+  clip: GainNode;
+  ambience: GainNode;
+};
+
+function createGraph(volume: number): AudioGraph {
+  const context = new AudioContext();
+  const gain = (value: number) => {
+    const node = context.createGain();
+    node.gain.value = value;
+    return node;
+  };
+  const graph = {
+    context,
+    master: gain(volume),
+    output: gain(1),
+    bed: gain(1),
+    clip: gain(0),
+    ambience: gain(1),
+  };
+  graph.bed.connect(graph.master);
+  graph.clip.connect(graph.master);
+  graph.ambience.connect(graph.master);
+  graph.master.connect(graph.output);
+  graph.output.connect(context.destination);
+  return graph;
+}
+
 function fadeTo(gain: GainNode, value: number, seconds = 0.85) {
   const now = gain.context.currentTime;
   gain.gain.cancelScheduledValues(now);
@@ -44,84 +93,65 @@ function fadeTo(gain: GainNode, value: number, seconds = 0.85) {
   gain.gain.linearRampToValueAtTime(value, now + seconds);
 }
 
-function clampVolume(value: number) {
-  return Math.min(1, Math.max(0, value));
+function clipCacheKey(world: World) {
+  return `${world.id}:${world.music.prompt}`;
 }
 
-export function useAudioEngine() {
+export function useAudioEngine(initialWorld: World) {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [volume, setVolume] = useState(0.55);
+  const [volume, setVolumeState] = useState(DEFAULT_VOLUME);
   const [status, setStatus] = useState<AudioEngineStatus>("idle");
-  const [ambienceVolumes, setAmbienceVolumes] = useState<Record<string, number>>(
-    {},
-  );
-  const [ambienceMuted, setAmbienceMuted] = useState<Record<string, boolean>>(
-    {},
+  const ambiencePrefs = useSyncExternalStore(
+    subscribeAmbiencePrefs,
+    getAmbiencePrefs,
+    getServerAmbiencePrefs,
   );
 
-  const contextRef = useRef<AudioContext | null>(null);
-  const masterGainRef = useRef<GainNode | null>(null);
-  const bedGainRef = useRef<GainNode | null>(null);
-  const clipGainRef = useRef<GainNode | null>(null);
-  const outputGainRef = useRef<GainNode | null>(null);
-  const ambienceBusRef = useRef<GainNode | null>(null);
+  const graphRef = useRef<AudioGraph | null>(null);
+  const bootRef = useRef<Promise<ProceduralEngine> | null>(null);
   const engineRef = useRef<ProceduralEngine | null>(null);
   const loopRef = useRef<LoopHandle | null>(null);
-  const bootRef = useRef<Promise<void> | null>(null);
-  const playingRef = useRef(false);
-  const toggleAtRef = useRef(0);
-  const volumeRef = useRef(0.55);
-  const requestRef = useRef(0);
-  const ambienceTokenRef = useRef(0);
   const voicesRef = useRef(new Map<string, AmbienceVoice>());
-  const ambienceVolumesRef = useRef<Record<string, number>>({});
-  const ambienceMutedRef = useRef<Record<string, boolean>>({});
   const eventSoundRef = useRef<{ stop: () => void } | null>(null);
+
+  /** The world audio should follow: the transition target, set before the screen swaps. */
+  const worldRef = useRef(initialWorld);
+  /** The world whose sources are currently running, or null when stopped. */
+  const soundingWorldIdRef = useRef<WorldId | null>(null);
+  const playingRef = useRef(false);
+  const startingRef = useRef(false);
+  const volumeRef = useRef(DEFAULT_VOLUME);
+  const restoreVolumeRef = useRef(DEFAULT_VOLUME);
+
+  // Bumping a token invalidates in-flight async work of that kind.
+  const startTokenRef = useRef(0);
+  const clipTokenRef = useRef(0);
+  const ambienceTokenRef = useRef(0);
   const eventTokenRef = useRef(0);
 
   const ensureGraph = useCallback(async () => {
-    if (!contextRef.current) {
-      const context = new AudioContext();
-      const masterGain = context.createGain();
-      const bedGain = context.createGain();
-      const clipGain = context.createGain();
-      const outputGain = context.createGain();
-      const ambienceBus = context.createGain();
-      masterGain.gain.value = volumeRef.current;
-      bedGain.gain.value = 1;
-      clipGain.gain.value = 0;
-      outputGain.gain.value = 1;
-      ambienceBus.gain.value = 1;
-      bedGain.connect(masterGain);
-      clipGain.connect(masterGain);
-      ambienceBus.connect(masterGain);
-      masterGain.connect(outputGain);
-      outputGain.connect(context.destination);
-      contextRef.current = context;
-      masterGainRef.current = masterGain;
-      bedGainRef.current = bedGain;
-      clipGainRef.current = clipGain;
-      outputGainRef.current = outputGain;
-      ambienceBusRef.current = ambienceBus;
-    }
+    const graph = (graphRef.current ??= createGraph(volumeRef.current));
+    // Called synchronously inside the click/keypress so autoplay policy allows it.
+    void graph.context.resume().catch(() => {});
 
-    void contextRef.current.resume();
-
-    if (!bootRef.current) {
-      const context = contextRef.current;
-      const bedGain = bedGainRef.current;
-      bootRef.current = createProceduralEngine(context, bedGain!).then((engine) => {
-        engineRef.current = engine;
-      }).catch((error: unknown) => {
+    bootRef.current ??= createProceduralEngine(graph.context, graph.bed).then(
+      (engine) => {
+        if (graphRef.current === graph) {
+          engineRef.current = engine;
+        }
+        return engine;
+      },
+      (error: unknown) => {
         bootRef.current = null;
         throw error;
-      });
-    }
+      },
+    );
 
     await bootRef.current;
-    if (contextRef.current.state === "suspended") {
-      await contextRef.current.resume();
+    if (graph.context.state === "suspended") {
+      await graph.context.resume();
     }
+    return graph;
   }, []);
 
   const stopClip = useCallback(() => {
@@ -129,22 +159,14 @@ export function useAudioEngine() {
     loopRef.current = null;
   }, []);
 
-  const trackVolume = useCallback((track: AmbienceTrack) => {
-    if (ambienceMutedRef.current[track.id]) {
-      return 0;
-    }
-    const stored = ambienceVolumesRef.current[track.id];
-    return typeof stored === "number" ? clampVolume(stored) : track.defaultVolume;
-  }, []);
-
-  const applyVoiceVolume = useCallback((trackId: string, value: number) => {
+  const applyAmbienceLevel = useCallback((trackId: string) => {
     const voice = voicesRef.current.get(trackId);
     if (!voice) {
       return;
     }
     const now = voice.gain.context.currentTime;
     voice.gain.gain.cancelScheduledValues(now);
-    voice.gain.gain.setTargetAtTime(value, now, 0.03);
+    voice.gain.gain.setTargetAtTime(ambienceLevel(voice.track, getAmbiencePrefs()), now, 0.03);
   }, []);
 
   const stopAmbience = useCallback(() => {
@@ -154,66 +176,56 @@ export function useAudioEngine() {
 
   const startAmbience = useCallback(
     async (world: World) => {
-      const token = (ambienceTokenRef.current += 1);
-      stopAmbienceVoices(voicesRef.current);
-      if (!playingRef.current) {
+      stopAmbience();
+      const token = ambienceTokenRef.current;
+      const graph = graphRef.current;
+      if (!graph || !playingRef.current) {
         return;
       }
 
-      const context = contextRef.current;
-      const bus = ambienceBusRef.current;
-      if (!context || !bus) {
-        return;
-      }
-
+      // Each track loads independently; a missing file only silences that track.
       const loaded = await Promise.all(
-        world.ambience.map(async (track) => {
-          try {
-            return {
-              track,
-              buffer: await loadAmbienceBuffer(context, track.src),
-            };
-          } catch {
-            return { track, buffer: null };
-          }
-        }),
+        world.ambience.map((track) =>
+          loadAudioBuffer(graph.context, track.src).then(
+            (buffer) => ({ track, buffer }),
+            () => null,
+          ),
+        ),
       );
-
       if (token !== ambienceTokenRef.current || !playingRef.current) {
         return;
       }
 
+      const prefs = getAmbiencePrefs();
       for (const item of loaded) {
-        if (!item.buffer) {
-          continue;
+        if (item) {
+          voicesRef.current.set(
+            item.track.id,
+            startAmbienceVoice(
+              graph.context,
+              graph.ambience,
+              item.track,
+              item.buffer,
+              ambienceLevel(item.track, prefs),
+            ),
+          );
         }
-        const voice = startAmbienceVoice(
-          context,
-          bus,
-          item.track,
-          item.buffer,
-          trackVolume(item.track),
-        );
-        voicesRef.current.set(item.track.id, voice);
       }
     },
-    [trackVolume],
+    [stopAmbience],
   );
 
   const playClip = useCallback(
     (clip: GeneratedClip) => {
-      const context = contextRef.current;
-      const clipGain = clipGainRef.current;
-      const bedGain = bedGainRef.current;
-      if (!context || !clipGain || !bedGain || clip.samples.length < 1024) {
+      const graph = graphRef.current;
+      if (!graph || clip.samples.length < 1024) {
         return;
       }
-
-      const buffer = pcmToAudioBuffer(context, clip.samples, clip.sampleRate);
+      const buffer = pcmToAudioBuffer(graph.context, clip.samples, clip.sampleRate);
       stopClip();
-      fadeTo(bedGain, 0);
-      fadeTo(clipGain, 1);
-      loopRef.current = startLoopingBuffer(context, clipGain, buffer);
+      fadeTo(graph.bed, 0);
+      fadeTo(graph.clip, 1);
+      loopRef.current = startLoopingBuffer(graph.context, graph.clip, buffer);
       engineRef.current?.stop();
       setStatus("ready");
     },
@@ -222,9 +234,12 @@ export function useAudioEngine() {
 
   const requestNeuralClip = useCallback(
     async (world: World) => {
-      const token = (requestRef.current += 1);
-      const cached = await readClip(world.id);
-      if (token !== requestRef.current || !playingRef.current) {
+      const token = (clipTokenRef.current += 1);
+      const isCurrent = () => token === clipTokenRef.current && playingRef.current;
+      const key = clipCacheKey(world);
+
+      const cached = await readClip(key);
+      if (!isCurrent()) {
         return;
       }
       if (cached) {
@@ -233,17 +248,20 @@ export function useAudioEngine() {
       }
 
       try {
-        const clip = await generateMusicClip(world.musicPrompt, (nextStatus) => {
-          if (token === requestRef.current && playingRef.current) {
+        const clip = await generateMusicClip(world.music.prompt, (nextStatus) => {
+          if (isCurrent()) {
             setStatus(nextStatus);
           }
         });
-        await writeClip(world.id, clip);
-        if (token === requestRef.current && playingRef.current) {
+        await writeClip(key, clip);
+        if (isCurrent()) {
           playClip(clip);
         }
-      } catch {
-        if (token === requestRef.current && playingRef.current) {
+      } catch (error) {
+        if (isDev) {
+          console.warn("[orbital-lofi] MusicGen clip unavailable; staying on bed", error);
+        }
+        if (isCurrent()) {
           setStatus("bed");
         }
       }
@@ -253,17 +271,26 @@ export function useAudioEngine() {
 
   const startBed = useCallback(
     (world: World) => {
-      const bedGain = bedGainRef.current;
-      const clipGain = clipGainRef.current;
-      if (bedGain && clipGain) {
-        fadeTo(clipGain, 0, 0.4);
-        fadeTo(bedGain, 1, 0.4);
+      const graph = graphRef.current;
+      if (graph) {
+        fadeTo(graph.clip, 0, 0.4);
+        fadeTo(graph.bed, 1, 0.4);
       }
       stopClip();
-      engineRef.current?.start(world.music);
+      engineRef.current?.start(world.music.bed);
       setStatus("bed");
     },
     [stopClip],
+  );
+
+  const startWorldAudio = useCallback(
+    (world: World) => {
+      soundingWorldIdRef.current = world.id;
+      startBed(world);
+      void requestNeuralClip(world);
+      void startAmbience(world);
+    },
+    [requestNeuralClip, startAmbience, startBed],
   );
 
   const stopEventSound = useCallback(() => {
@@ -273,10 +300,9 @@ export function useAudioEngine() {
   }, []);
 
   const playEventSound = useCallback(
-    async (src: string, volume = 0.5) => {
-      const context = contextRef.current;
-      const master = masterGainRef.current;
-      if (!playingRef.current || !context || !master) {
+    async (src: string, level = 0.5) => {
+      const graph = graphRef.current;
+      if (!playingRef.current || !graph) {
         return false;
       }
 
@@ -284,20 +310,21 @@ export function useAudioEngine() {
       const token = eventTokenRef.current;
       let buffer: AudioBuffer;
       try {
-        buffer = await loadAmbienceBuffer(context, src);
+        buffer = await loadAudioBuffer(graph.context, src);
       } catch {
         return false;
       }
-      if (token !== eventTokenRef.current || !playingRef.current) {
+      if (token !== eventTokenRef.current || !playingRef.current || graphRef.current !== graph) {
         return false;
       }
 
+      const { context } = graph;
       const source = context.createBufferSource();
       const gain = context.createGain();
       source.buffer = buffer;
-      gain.gain.value = clampVolume(volume);
+      gain.gain.value = clampVolume(level);
       source.connect(gain);
-      gain.connect(master);
+      gain.connect(graph.master);
 
       const handle = {
         stop() {
@@ -328,152 +355,140 @@ export function useAudioEngine() {
     [stopEventSound],
   );
 
-  const togglePlayback = useCallback(
-    async (world: World) => {
-      const now = performance.now();
-      if (now - toggleAtRef.current < 120) {
+  const stopPlayback = useCallback(() => {
+    startTokenRef.current += 1;
+    clipTokenRef.current += 1;
+    startingRef.current = false;
+    playingRef.current = false;
+    soundingWorldIdRef.current = null;
+    setIsPlaying(false);
+    engineRef.current?.stop();
+    stopClip();
+    stopAmbience();
+    stopEventSound();
+    const graph = graphRef.current;
+    if (graph) {
+      fadeTo(graph.clip, 0, 0.05);
+      graph.output.gain.cancelScheduledValues(graph.context.currentTime);
+      graph.output.gain.value = 1;
+    }
+    setStatus("idle");
+  }, [stopAmbience, stopClip, stopEventSound]);
+
+  const togglePlayback = useCallback(async () => {
+    // A second press while the engine is still booting cancels the start.
+    if (playingRef.current || startingRef.current) {
+      stopPlayback();
+      return;
+    }
+
+    const token = (startTokenRef.current += 1);
+    startingRef.current = true;
+    try {
+      const graph = await ensureGraph();
+      if (token !== startTokenRef.current) {
         return;
       }
-      toggleAtRef.current = now;
-
-      if (playingRef.current) {
-        requestRef.current += 1;
-        playingRef.current = false;
-        setIsPlaying(false);
-        engineRef.current?.stop();
-        stopClip();
-        stopAmbience();
-        stopEventSound();
-        if (clipGainRef.current) {
-          fadeTo(clipGainRef.current, 0, 0.05);
-        }
-        if (outputGainRef.current) {
-          outputGainRef.current.gain.cancelScheduledValues(
-            outputGainRef.current.context.currentTime,
-          );
-          outputGainRef.current.gain.value = 1;
+      startingRef.current = false;
+      if (graph.context.state !== "running") {
+        if (isDev) {
+          console.warn("[orbital-lofi] Audio is blocked by the browser; press Play again");
         }
         setStatus("idle");
         return;
       }
-
-      try {
-        await ensureGraph();
-        playingRef.current = true;
-        setIsPlaying(true);
-        startBed(world);
-        void requestNeuralClip(world);
-        void startAmbience(world);
-      } catch (error) {
-        console.error("Playback failed", error);
-        playingRef.current = false;
-        setIsPlaying(false);
-        setStatus("error");
+      playingRef.current = true;
+      setIsPlaying(true);
+      startWorldAudio(worldRef.current);
+    } catch (error) {
+      if (token !== startTokenRef.current) {
+        return;
       }
-    },
-    [
-      ensureGraph,
-      requestNeuralClip,
-      startAmbience,
-      startBed,
-      stopAmbience,
-      stopClip,
-      stopEventSound,
-    ],
-  );
+      startingRef.current = false;
+      console.error("[orbital-lofi] Playback failed", error);
+      setStatus("error");
+    }
+  }, [ensureGraph, startWorldAudio, stopPlayback]);
 
   const beginWorldTransition = useCallback(
     (world: World) => {
-      requestRef.current += 1;
-      stopEventSound();
-      const context = contextRef.current;
-      if (context) {
-        preloadWorldAmbience(context, world);
+      worldRef.current = world;
+      if (soundingWorldIdRef.current !== world.id) {
+        clipTokenRef.current += 1;
       }
-      if (!playingRef.current || !outputGainRef.current) {
+      stopEventSound();
+      const graph = graphRef.current;
+      if (!graph) {
         return;
       }
-      fadeTo(outputGainRef.current, 0, 0.55);
+      preloadWorldAmbience(graph.context, world);
+      if (playingRef.current) {
+        fadeTo(graph.output, 0, TRANSITION_FADE_S);
+      }
     },
     [stopEventSound],
   );
 
   const finishWorldTransition = useCallback(
     (world: World) => {
-      const output = outputGainRef.current;
+      worldRef.current = world;
+      const graph = graphRef.current;
       if (!playingRef.current) {
-        stopAmbience();
-        if (output) {
-          fadeTo(output, 1, 0.05);
+        if (graph) {
+          fadeTo(graph.output, 1, 0.05);
         }
         return;
       }
-      startBed(world);
-      void requestNeuralClip(world);
-      void startAmbience(world);
-      if (output) {
-        fadeTo(output, 1, 0.55);
+      if (soundingWorldIdRef.current !== world.id) {
+        startWorldAudio(world);
+      }
+      if (graph) {
+        fadeTo(graph.output, 1, TRANSITION_FADE_S);
       }
     },
-    [requestNeuralClip, startAmbience, startBed, stopAmbience],
+    [startWorldAudio],
   );
 
-  const onVolumeChange = useCallback((nextVolume: number) => {
-    const clamped = clampVolume(nextVolume);
+  const setVolume = useCallback((next: number) => {
+    const clamped = clampVolume(next);
     volumeRef.current = clamped;
-    setVolume(clamped);
-    const gain = masterGainRef.current;
-    if (gain) {
-      gain.gain.setTargetAtTime(clamped, gain.context.currentTime, 0.02);
+    setVolumeState(clamped);
+    const graph = graphRef.current;
+    if (graph) {
+      graph.master.gain.setTargetAtTime(clamped, graph.context.currentTime, 0.02);
     }
   }, []);
 
-  const persistPrefs = useCallback(() => {
-    saveAmbiencePrefs({
-      volumes: ambienceVolumesRef.current,
-      muted: ambienceMutedRef.current,
-    });
-  }, []);
+  const toggleMute = useCallback(() => {
+    if (volumeRef.current > 0) {
+      restoreVolumeRef.current = volumeRef.current;
+      setVolume(0);
+    } else {
+      setVolume(restoreVolumeRef.current);
+    }
+  }, [setVolume]);
 
-  const onAmbienceVolumeChange = useCallback(
-    (trackId: string, nextVolume: number) => {
-      const clamped = clampVolume(nextVolume);
-      const nextVolumes = { ...ambienceVolumesRef.current, [trackId]: clamped };
-      const nextMuted = { ...ambienceMutedRef.current, [trackId]: false };
-      ambienceVolumesRef.current = nextVolumes;
-      ambienceMutedRef.current = nextMuted;
-      setAmbienceVolumes(nextVolumes);
-      setAmbienceMuted(nextMuted);
-      applyVoiceVolume(trackId, clamped);
-      persistPrefs();
+  const setAmbienceVolume = useCallback(
+    (trackId: string, next: number) => {
+      updateAmbiencePrefs((prefs) => ({
+        volumes: { ...prefs.volumes, [trackId]: clampVolume(next) },
+        muted: { ...prefs.muted, [trackId]: false },
+      }));
+      applyAmbienceLevel(trackId);
     },
-    [applyVoiceVolume, persistPrefs],
+    [applyAmbienceLevel],
   );
 
-  const onAmbienceMuteToggle = useCallback(
-    (trackId: string, defaultVolume: number) => {
-      const nextMuted = {
-        ...ambienceMutedRef.current,
-        [trackId]: !ambienceMutedRef.current[trackId],
-      };
-      ambienceMutedRef.current = nextMuted;
-      setAmbienceMuted(nextMuted);
-      const stored = ambienceVolumesRef.current[trackId];
-      const restored =
-        typeof stored === "number" ? stored : clampVolume(defaultVolume);
-      applyVoiceVolume(trackId, nextMuted[trackId] ? 0 : restored);
-      persistPrefs();
+  const toggleAmbienceMute = useCallback(
+    (trackId: string) => {
+      updateAmbiencePrefs((prefs) => ({
+        ...prefs,
+        muted: { ...prefs.muted, [trackId]: !prefs.muted[trackId] },
+      }));
+      applyAmbienceLevel(trackId);
     },
-    [applyVoiceVolume, persistPrefs],
+    [applyAmbienceLevel],
   );
-
-  useEffect(() => {
-    const prefs = loadAmbiencePrefs();
-    ambienceVolumesRef.current = prefs.volumes;
-    ambienceMutedRef.current = prefs.muted;
-    setAmbienceVolumes(prefs.volumes);
-    setAmbienceMuted(prefs.muted);
-  }, []);
 
   useEffect(() => {
     const warm = () => {
@@ -490,21 +505,35 @@ export function useAudioEngine() {
         .catch(() => {});
     };
 
-    const idle = window.requestIdleCallback?.(warm, { timeout: 1200 });
-    const fallback = typeof idle === "number" ? 0 : window.setTimeout(warm, 400);
+    if (typeof window.requestIdleCallback === "function") {
+      const idle = window.requestIdleCallback(warm, { timeout: 1200 });
+      return () => window.cancelIdleCallback(idle);
+    }
+    const timer = window.setTimeout(warm, 400);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    const voices = voicesRef.current;
     return () => {
-      if (typeof idle === "number") {
-        window.cancelIdleCallback?.(idle);
-      }
-      if (fallback) {
-        window.clearTimeout(fallback);
-      }
-      requestRef.current += 1;
+      startTokenRef.current += 1;
+      clipTokenRef.current += 1;
       ambienceTokenRef.current += 1;
+      startingRef.current = false;
+      playingRef.current = false;
+      soundingWorldIdRef.current = null;
       engineRef.current?.stop();
       loopRef.current?.stop(0.01);
-      stopAmbienceVoices(voicesRef.current);
+      loopRef.current = null;
+      stopAmbienceVoices(voices);
       stopEventSound();
+      const graph = graphRef.current;
+      graphRef.current = null;
+      bootRef.current = null;
+      engineRef.current = null;
+      void graph?.context.close().catch(() => {});
+      setIsPlaying(false);
+      setStatus("idle");
     };
   }, [stopEventSound]);
 
@@ -512,14 +541,14 @@ export function useAudioEngine() {
     isPlaying,
     volume,
     status,
-    ambienceVolumes,
-    ambienceMuted,
+    ambiencePrefs,
     togglePlayback,
     beginWorldTransition,
     finishWorldTransition,
-    setVolume: onVolumeChange,
-    setAmbienceVolume: onAmbienceVolumeChange,
-    toggleAmbienceMute: onAmbienceMuteToggle,
+    setVolume,
+    toggleMute,
+    setAmbienceVolume,
+    toggleAmbienceMute,
     playEventSound,
     stopEventSound,
   };

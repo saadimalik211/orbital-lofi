@@ -2,14 +2,14 @@
 
 import { useEffect, useRef } from "react";
 import { createBackdropRenderer } from "@/backdrops/createBackdropRenderer";
-import type { WorldId } from "@/worlds/types";
+import type { SceneBackdropId } from "@/worlds/types";
 
 type WorldBackdropProps = {
-  worldId: WorldId;
+  backdrop: SceneBackdropId;
   onReady?: () => void;
 };
 
-export function WorldBackdrop({ worldId, onReady }: WorldBackdropProps) {
+export function WorldBackdrop({ backdrop, onReady }: WorldBackdropProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const onReadyRef = useRef(onReady);
 
@@ -24,14 +24,16 @@ export function WorldBackdrop({ worldId, onReady }: WorldBackdropProps) {
     }
 
     try {
-      return createBackdropRenderer(canvas, worldId, () => {
+      return createBackdropRenderer(canvas, backdrop, () => {
         onReadyRef.current?.();
       });
-    } catch {
+    } catch (error) {
+      if (process.env.NODE_ENV !== "production") {
+        console.warn(`[orbital-lofi] Backdrop "${backdrop}" failed to start`, error);
+      }
       onReadyRef.current?.();
-      return;
     }
-  }, [worldId]);
+  }, [backdrop]);
 
   return (
     <canvas

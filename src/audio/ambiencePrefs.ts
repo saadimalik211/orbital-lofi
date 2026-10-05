@@ -1,54 +1,88 @@
+import type { AmbienceTrack } from "@/worlds/types";
+
 const STORAGE_KEY = "orbital-lofi.ambience";
 
+/** Keyed by ambience track id, so tracks sharing an id across worlds share a level. */
 export type AmbiencePrefs = {
-  volumes: Record<string, number>;
-  muted: Record<string, boolean>;
+  volumes: Readonly<Record<string, number>>;
+  muted: Readonly<Record<string, boolean>>;
 };
 
-const emptyPrefs: AmbiencePrefs = { volumes: {}, muted: {} };
+const EMPTY_PREFS: AmbiencePrefs = { volumes: {}, muted: {} };
 
-function clampVolume(value: number) {
+let current: AmbiencePrefs | null = null;
+const listeners = new Set<() => void>();
+
+export function clampVolume(value: number) {
   return Math.min(1, Math.max(0, value));
 }
 
-export function loadAmbiencePrefs(): AmbiencePrefs {
-  if (typeof window === "undefined") {
-    return emptyPrefs;
-  }
-
+function readStorage(): AmbiencePrefs {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      return emptyPrefs;
+      return EMPTY_PREFS;
     }
-    const parsed = JSON.parse(raw) as Partial<AmbiencePrefs>;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return EMPTY_PREFS;
+    }
+    const { volumes: rawVolumes, muted: rawMuted } = parsed as Record<string, unknown>;
     const volumes: Record<string, number> = {};
     const muted: Record<string, boolean> = {};
-    if (parsed.volumes && typeof parsed.volumes === "object") {
-      for (const [id, value] of Object.entries(parsed.volumes)) {
+    if (rawVolumes && typeof rawVolumes === "object") {
+      for (const [id, value] of Object.entries(rawVolumes)) {
         if (typeof value === "number" && Number.isFinite(value)) {
           volumes[id] = clampVolume(value);
         }
       }
     }
-    if (parsed.muted && typeof parsed.muted === "object") {
-      for (const [id, value] of Object.entries(parsed.muted)) {
+    if (rawMuted && typeof rawMuted === "object") {
+      for (const [id, value] of Object.entries(rawMuted)) {
         muted[id] = Boolean(value);
       }
     }
     return { volumes, muted };
   } catch {
-    return emptyPrefs;
+    return EMPTY_PREFS;
   }
 }
 
-export function saveAmbiencePrefs(prefs: AmbiencePrefs) {
+export function getAmbiencePrefs(): AmbiencePrefs {
   if (typeof window === "undefined") {
-    return;
+    return EMPTY_PREFS;
   }
+  current ??= readStorage();
+  return current;
+}
+
+export function getServerAmbiencePrefs(): AmbiencePrefs {
+  return EMPTY_PREFS;
+}
+
+export function subscribeAmbiencePrefs(listener: () => void) {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+export function updateAmbiencePrefs(update: (prefs: AmbiencePrefs) => AmbiencePrefs) {
+  current = update(getAmbiencePrefs());
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
   } catch {
-    // private mode / quota
+    // private mode / quota: keep in-memory prefs
   }
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
+/** Effective gain for a track: muted → 0, otherwise the stored level or the track default. */
+export function ambienceLevel(track: AmbienceTrack, prefs: AmbiencePrefs) {
+  if (prefs.muted[track.id]) {
+    return 0;
+  }
+  return prefs.volumes[track.id] ?? clampVolume(track.defaultVolume);
 }
