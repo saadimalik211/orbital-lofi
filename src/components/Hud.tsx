@@ -1,7 +1,7 @@
 import { AmbienceMixer } from "@/components/AmbienceMixer";
 import { WorldSelector } from "@/components/WorldSelector";
 import type { AmbiencePrefs } from "@/audio/ambiencePrefs";
-import type { AudioEngineStatus } from "@/audio/useAudioEngine";
+import type { AudioEngineStatus, TrackInfo } from "@/audio/useAudioEngine";
 import type { World, WorldId } from "@/worlds/types";
 
 type HudProps = {
@@ -10,11 +10,13 @@ type HudProps = {
   selectedWorldId: WorldId;
   isPlaying: boolean;
   status: AudioEngineStatus;
+  track: TrackInfo;
   volume: number;
   visible: boolean;
   idle: boolean;
   onSelectWorld: (worldId: WorldId) => void;
   onTogglePlayback: () => void;
+  onNextTrack: () => void;
   onVolumeChange: (volume: number) => void;
   onToggleHud: () => void;
   ambiencePrefs: AmbiencePrefs;
@@ -47,11 +49,13 @@ export function Hud({
   selectedWorldId,
   isPlaying,
   status,
+  track,
   volume,
   visible,
   idle,
   onSelectWorld,
   onTogglePlayback,
+  onNextTrack,
   onVolumeChange,
   onToggleHud,
   ambiencePrefs,
@@ -105,6 +109,25 @@ export function Hud({
             >
               {isPlaying ? "Pause" : "Play"}
             </button>
+
+            {track.count > 1 ? (
+              <button
+                type="button"
+                onClick={onNextTrack}
+                aria-label="Next track"
+                title="Next track"
+                className="hud-btn hud-btn-quiet px-1 font-mono text-[11px] tracking-[0.28em] uppercase"
+              >
+                Next <span aria-hidden>&gt;|</span>
+              </button>
+            ) : null}
+
+            <p className="font-mono text-[10px] tracking-[0.24em] text-[#6f8f80] uppercase" aria-live="polite">
+              <span className="text-[#5e7a6d]">
+                {String(track.index + 1).padStart(2, "0")}/{String(track.count).padStart(2, "0")}
+              </span>
+              {track.title ? <span className="ml-2">{track.title}</span> : null}
+            </p>
 
             <label
               className={`flex min-h-11 items-center gap-3 font-mono text-[10px] tracking-[0.24em] uppercase ${

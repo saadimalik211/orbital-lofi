@@ -63,12 +63,14 @@ export function WorldScene() {
         selectedWorldId={transition.targetWorldId}
         isPlaying={audio.isPlaying}
         status={audio.status}
+        track={audio.track}
         volume={audio.volume}
         visible={hud.hudVisible}
         idle={hud.idle}
         ambiencePrefs={audio.ambiencePrefs}
         onSelectWorld={transition.requestWorld}
         onTogglePlayback={audio.togglePlayback}
+        onNextTrack={audio.nextTrack}
         onVolumeChange={audio.setVolume}
         onToggleHud={hud.toggleHud}
         onAmbienceVolumeChange={audio.setAmbienceVolume}

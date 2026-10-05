@@ -1,8 +1,9 @@
 # Orbital Lofi
 
-A cinematic sci-fi ambient listening terminal. Each world is an image, video or WebGL shader scene with an
-instant procedural lofi bed, an in-browser MusicGen clip that crossfades in, looping
-ambience, canvas/CSS environmental effects and occasional random events.
+A cinematic sci-fi ambient listening terminal. Each world is an image, video or WebGL shader
+scene with a music playlist (audio files and/or generated tracks: an instant procedural bed
+plus an in-browser MusicGen clip), looping ambience, canvas/CSS environmental effects and
+occasional random events.
 
 No backend: everything runs in the browser. Mixer levels persist in `localStorage`;
 generated clips are cached in IndexedDB.
@@ -24,7 +25,7 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
 | `src/components/WorldScene.tsx` | Composes the layers and wires hooks together |
 | `src/components/WorldBackdrop.tsx` | Renders the scene: image, video or shader |
 | `src/backdrops/` | WebGL shader scenes (`shaders.ts`) and their renderer |
-| `src/audio/` | Web Audio engine: procedural bed, MusicGen worker, ambience, event sounds |
+| `src/audio/` | Web Audio engine: music playlist (file player, procedural bed, MusicGen worker), ambience, event sounds |
 | `src/effects/` | Rain / stars / particles canvas + CSS fog and flicker |
 | `src/events/` | Event scheduler and event visuals |
 | `src/hud/`, `src/components/Hud.tsx` | HUD idle/visibility, keyboard shortcuts, controls |
@@ -39,6 +40,7 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
    ```
    public/worlds/ice-moon/
      scene/      background still or video: ice-moon.png, loop.mp4 …
+     music/      playlist files: ice-moon-01.mp3 …
      ambience/   looping beds: wind.wav, generator.wav …
      events/     one-shot sounds and optional flyby art: crack.wav, probe.png …
    ```
@@ -70,10 +72,17 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      name: "Ice Moon",
      year: 2203,
      scene: { type: "image", src: "/worlds/ice-moon/scene/ice-moon.png" },
-     music: {
-       prompt: "glacial ambient lofi, frozen moon base, soft bells, 70 bpm, looping instrumental",
-       bed: { seed: 2203, bpm: 70, rootMidi: 55, swing: 0.55, brightness: 0.4, texture: 0.2 },
-     },
+     music: [
+       { id: "ice-moon-01", title: "Glacier", src: "/worlds/ice-moon/music/ice-moon-01.mp3" },
+       {
+         id: "ice-moon-generated",
+         title: "Frost Signal",
+         generate: {
+           prompt: "glacial ambient lofi, frozen moon base, soft bells, 70 bpm, looping instrumental",
+           bed: { seed: 2203, bpm: 70, rootMidi: 55, swing: 0.55, brightness: 0.4, texture: 0.2 },
+         },
+       },
+     ],
      ambience: [
        { id: "wind", name: "Wind", src: "/worlds/ice-moon/ambience/wind.wav", defaultVolume: 0.3 },
      ],
@@ -85,9 +94,15 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
    }
    ```
 
-   - **Music:** `prompt` drives MusicGen; `bed` is the instant procedural fallback.
-     `brightness` (0–1) opens the filter, `texture` (0–1) adds vinyl crackle. Changing the
-     prompt invalidates that world's cached clip automatically.
+   - **Music:** a playlist (at least one track) in play order. `title` is optional and shown
+     in the HUD. `Next` (shown when there are 2+ tracks) fades out, moves to the following
+     track, and fades in; the selection is remembered per world.
+     - File track `{ id, src }`: plays once (don't bake in a loop), then the playlist
+       advances. A missing/unplayable file is skipped.
+     - Generated track `{ id, generate: { prompt, bed } }`: `bed` is an instant procedural
+       groove; `prompt` renders a MusicGen clip in the browser that crossfades in. Loops until
+       Next. `brightness` (0–1) opens the filter, `texture` (0–1) adds vinyl crackle. Changing
+       the prompt invalidates the cached clip automatically.
    - **Ambience:** `id` keys the saved mixer level, so a `rain` track in two worlds shares one
      level. Use a distinct id if it should be independent. `defaultVolume` is 0–1.
    - **Effects:** each entry is optional; `intensity` is 0–1. Available: `rain`, `fog`,

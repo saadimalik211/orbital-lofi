@@ -24,12 +24,28 @@ export type MusicBed = {
   texture: number;
 };
 
-export type WorldMusic = {
+export type GeneratedMusic = {
   /** MusicGen text prompt for the generated clip. */
   prompt: string;
   /** Procedural bed that plays instantly while the clip renders. */
   bed: MusicBed;
 };
+
+type TrackBase = {
+  id: string;
+  title?: string;
+};
+
+/** Audio file in `public/worlds/<world-id>/music/`. Plays once, then the playlist advances. */
+export type FileMusicTrack = TrackBase & { src: string };
+
+/** Procedural bed + in-browser MusicGen clip. Loops until Next or a world change. */
+export type GeneratedMusicTrack = TrackBase & { generate: GeneratedMusic };
+
+export type MusicTrack = FileMusicTrack | GeneratedMusicTrack;
+
+/** Playlist in play order; at least one track. */
+export type WorldMusic = readonly [MusicTrack, ...MusicTrack[]];
 
 export type AmbienceTrack = {
   id: string;

@@ -25,6 +25,17 @@ export function validateWorlds(worlds: readonly World[]) {
       checkSrc("scene", world.scene.src);
     }
 
+    const musicIds = new Set<string>();
+    for (const track of world.music) {
+      if (musicIds.has(track.id)) {
+        problems.push(`${at("music")} duplicate track id "${track.id}"`);
+      }
+      musicIds.add(track.id);
+      if ("src" in track) {
+        checkSrc(`music.${track.id}`, track.src);
+      }
+    }
+
     const trackIds = new Set<string>();
     for (const track of world.ambience) {
       if (trackIds.has(track.id)) {

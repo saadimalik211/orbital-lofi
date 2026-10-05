@@ -2,7 +2,7 @@ import type { World, WorldId } from "./types";
 import { validateWorlds } from "./validateWorlds";
 
 /**
- * Assets live under `public/worlds/<world-id>/{scene,ambience,events}/`.
+ * Assets live under `public/worlds/<world-id>/{scene,music,ambience,events}/`.
  * Any referenced file may be missing: that layer stays silent / falls back, nothing else breaks.
  */
 export const worlds: World[] = [
@@ -11,11 +11,26 @@ export const worlds: World[] = [
     name: "Orbital Station",
     year: 2187,
     scene: { type: "image", src: "/worlds/orbital-station/scene/orbital-station.png" },
-    music: {
-      prompt:
-        "restrained ambient electronic, deep space station drifting in orbit, warm analog pads, soft sub pulse, sparse electric piano, gentle tape hiss, 68 bpm, calm, spacious, looping instrumental",
-      bed: { seed: 2187, bpm: 68, rootMidi: 57, swing: 0.54, brightness: 0.3, texture: 0.3 },
-    },
+    music: [
+      {
+        id: "orbital-drift",
+        title: "Drift",
+        generate: {
+          prompt:
+            "restrained ambient electronic, deep space station drifting in orbit, warm analog pads, soft sub pulse, sparse electric piano, gentle tape hiss, 68 bpm, calm, spacious, looping instrumental",
+          bed: { seed: 2187, bpm: 68, rootMidi: 57, swing: 0.54, brightness: 0.3, texture: 0.3 },
+        },
+      },
+      {
+        id: "orbital-observation",
+        title: "Observation Deck",
+        generate: {
+          prompt:
+            "minimal ambient electronic, quiet space station observation deck, glassy slow arpeggios, soft analog pads, distant chimes, 64 bpm, serene, looping instrumental",
+          bed: { seed: 2188, bpm: 64, rootMidi: 55, swing: 0.52, brightness: 0.38, texture: 0.25 },
+        },
+      },
+    ],
     ambience: [
       {
         id: "engine",
@@ -97,11 +112,26 @@ export const worlds: World[] = [
     name: "Neon City",
     year: 2194,
     scene: { type: "image", src: "/worlds/neon-city/scene/neon-city.png" },
-    music: {
-      prompt:
-        "dark rainy cyberpunk lofi, neon city at night, muffled dusty drums, deep warm bass, moody analog synth chords, 80 bpm, melancholic, looping instrumental",
-      bed: { seed: 2194, bpm: 80, rootMidi: 50, swing: 0.6, brightness: 0.28, texture: 0.65 },
-    },
+    music: [
+      {
+        id: "neon-wet-pavement",
+        title: "Wet Pavement",
+        generate: {
+          prompt:
+            "dark rainy cyberpunk lofi, neon city at night, muffled dusty drums, deep warm bass, moody analog synth chords, 80 bpm, melancholic, looping instrumental",
+          bed: { seed: 2194, bpm: 80, rootMidi: 50, swing: 0.6, brightness: 0.28, texture: 0.65 },
+        },
+      },
+      {
+        id: "neon-last-train",
+        title: "Last Train",
+        generate: {
+          prompt:
+            "late night cyberpunk lofi, empty neon train platform, warm rhodes, deep sub bass, lazy brushed drums, 76 bpm, moody, looping instrumental",
+          bed: { seed: 2196, bpm: 76, rootMidi: 48, swing: 0.58, brightness: 0.24, texture: 0.7 },
+        },
+      },
+    ],
     ambience: [
       {
         id: "rain",

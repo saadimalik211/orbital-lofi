@@ -37,7 +37,8 @@ import {
   createProceduralEngine,
   type ProceduralEngine,
 } from "@/audio/proceduralEngine";
-import type { World, WorldId } from "@/worlds/types";
+import { createFilePlayer, type FilePlayer } from "@/audio/filePlayer";
+import type { GeneratedMusicTrack, MusicBed, World, WorldId } from "@/worlds/types";
 
 export type AudioEngineStatus =
   | "idle"
@@ -49,19 +50,32 @@ export type AudioEngineStatus =
 
 const DEFAULT_VOLUME = 0.55;
 const TRANSITION_FADE_S = 0.55;
+const TRACK_FADE_OUT_S = 0.6;
+const TRACK_FADE_IN_S = 0.9;
 const isDev = process.env.NODE_ENV !== "production";
 
+export type TrackInfo = {
+  id: string;
+  title?: string;
+  index: number;
+  count: number;
+};
+
 /**
- * bed / clip / ambience / event sounds → master (user volume) → output (transition fade) → speakers
+ * bed / clip / file → music (track fades) ┐
+ *                ambience / event sounds  ┴→ master (user volume) → output (transition fade) → speakers
  */
 type AudioGraph = {
   context: AudioContext;
   master: GainNode;
   output: GainNode;
+  music: GainNode;
   bed: GainNode;
   clip: GainNode;
   ambience: GainNode;
 };
+
+type SoundingTrack = { worldId: WorldId; index: number };
 
 function createGraph(volume: number): AudioGraph {
   const context = new AudioContext();
@@ -74,12 +88,14 @@ function createGraph(volume: number): AudioGraph {
     context,
     master: gain(volume),
     output: gain(1),
+    music: gain(1),
     bed: gain(1),
     clip: gain(0),
     ambience: gain(1),
   };
-  graph.bed.connect(graph.master);
-  graph.clip.connect(graph.master);
+  graph.bed.connect(graph.music);
+  graph.clip.connect(graph.music);
+  graph.music.connect(graph.master);
   graph.ambience.connect(graph.master);
   graph.master.connect(graph.output);
   graph.output.connect(context.destination);
@@ -93,14 +109,20 @@ function fadeTo(gain: GainNode, value: number, seconds = 0.85) {
   gain.gain.linearRampToValueAtTime(value, now + seconds);
 }
 
-function clipCacheKey(world: World) {
-  return `${world.id}:${world.music.prompt}`;
+function clipCacheKey(world: World, track: GeneratedMusicTrack) {
+  return `${world.id}:${track.id}:${track.generate.prompt}`;
+}
+
+function describeTrack(world: World, index: number): TrackInfo {
+  const track = world.music[index] ?? world.music[0];
+  return { id: track.id, title: track.title, index, count: world.music.length };
 }
 
 export function useAudioEngine(initialWorld: World) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolumeState] = useState(DEFAULT_VOLUME);
   const [status, setStatus] = useState<AudioEngineStatus>("idle");
+  const [track, setTrack] = useState(() => describeTrack(initialWorld, 0));
   const ambiencePrefs = useSyncExternalStore(
     subscribeAmbiencePrefs,
     getAmbiencePrefs,
@@ -111,13 +133,18 @@ export function useAudioEngine(initialWorld: World) {
   const bootRef = useRef<Promise<ProceduralEngine> | null>(null);
   const engineRef = useRef<ProceduralEngine | null>(null);
   const loopRef = useRef<LoopHandle | null>(null);
+  const fileRef = useRef<FilePlayer | null>(null);
   const voicesRef = useRef(new Map<string, AmbienceVoice>());
   const eventSoundRef = useRef<{ stop: () => void } | null>(null);
 
   /** The world audio should follow: the transition target, set before the screen swaps. */
   const worldRef = useRef(initialWorld);
-  /** The world whose sources are currently running, or null when stopped. */
-  const soundingWorldIdRef = useRef<WorldId | null>(null);
+  /** The world + track whose sources are currently running, or null when stopped. */
+  const soundingRef = useRef<SoundingTrack | null>(null);
+  /** Selected track per world; remembered across world switches. */
+  const trackIndexRef = useRef(new Map<WorldId, number>());
+  const switchTimerRef = useRef(0);
+  const fileFailuresRef = useRef(0);
   const playingRef = useRef(false);
   const startingRef = useRef(false);
   const volumeRef = useRef(DEFAULT_VOLUME);
@@ -233,10 +260,10 @@ export function useAudioEngine(initialWorld: World) {
   );
 
   const requestNeuralClip = useCallback(
-    async (world: World) => {
+    async (world: World, musicTrack: GeneratedMusicTrack) => {
       const token = (clipTokenRef.current += 1);
       const isCurrent = () => token === clipTokenRef.current && playingRef.current;
-      const key = clipCacheKey(world);
+      const key = clipCacheKey(world, musicTrack);
 
       const cached = await readClip(key);
       if (!isCurrent()) {
@@ -248,7 +275,7 @@ export function useAudioEngine(initialWorld: World) {
       }
 
       try {
-        const clip = await generateMusicClip(world.music.prompt, (nextStatus) => {
+        const clip = await generateMusicClip(musicTrack.generate.prompt, (nextStatus) => {
           if (isCurrent()) {
             setStatus(nextStatus);
           }
@@ -270,28 +297,138 @@ export function useAudioEngine(initialWorld: World) {
   );
 
   const startBed = useCallback(
-    (world: World) => {
+    (bed: MusicBed) => {
       const graph = graphRef.current;
       if (graph) {
         fadeTo(graph.clip, 0, 0.4);
         fadeTo(graph.bed, 1, 0.4);
       }
       stopClip();
-      engineRef.current?.start(world.music.bed);
+      engineRef.current?.start(bed);
       setStatus("bed");
     },
     [stopClip],
   );
 
+  const selectTrack = useCallback((world: World, index: number) => {
+    trackIndexRef.current.set(world.id, index);
+    setTrack(describeTrack(world, index));
+  }, []);
+
+  const selectedIndex = useCallback(
+    (world: World) =>
+      Math.min(trackIndexRef.current.get(world.id) ?? 0, world.music.length - 1),
+    [],
+  );
+
+  /** Stops every music source (bed, clip, file) and any pending Next switch. */
+  const stopMusic = useCallback(() => {
+    clipTokenRef.current += 1;
+    window.clearTimeout(switchTimerRef.current);
+    switchTimerRef.current = 0;
+    engineRef.current?.stop();
+    stopClip();
+    fileRef.current?.stop();
+  }, [stopClip]);
+
+  /** Replaces whatever music is playing with `world.music[index]`, ramping the music stage up. */
+  const startTrack = useCallback(
+    function start(world: World, index: number, fadeInSeconds: number) {
+      stopMusic();
+      soundingRef.current = { worldId: world.id, index };
+      const graph = graphRef.current;
+      const musicTrack = world.music[index];
+      if (!graph || !musicTrack) {
+        return;
+      }
+      fadeTo(graph.music, 1, fadeInSeconds);
+
+      if (!("src" in musicTrack)) {
+        fileFailuresRef.current = 0;
+        startBed(musicTrack.generate.bed);
+        void requestNeuralClip(world, musicTrack);
+        return;
+      }
+
+      // Same rule as Next; the finished track has already stopped, so nothing overlaps.
+      const advance = () => {
+        if (!playingRef.current || soundingRef.current?.worldId !== world.id) {
+          return;
+        }
+        const next = (index + 1) % world.music.length;
+        selectTrack(world, next);
+        start(world, next, 0.05);
+      };
+
+      fileRef.current ??= createFilePlayer(graph.context, graph.music);
+      fileRef.current.play(musicTrack.src, {
+        onPlaying: () => {
+          fileFailuresRef.current = 0;
+          setStatus("ready");
+        },
+        onEnded: advance,
+        onError: (error) => {
+          if (isDev) {
+            console.warn(`[orbital-lofi] Music unavailable: ${musicTrack.src}`, error ?? "");
+          }
+          fileFailuresRef.current += 1;
+          if (fileFailuresRef.current >= world.music.length) {
+            stopMusic();
+            setStatus("error");
+            return;
+          }
+          advance();
+        },
+      });
+    },
+    [requestNeuralClip, selectTrack, startBed, stopMusic],
+  );
+
   const startWorldAudio = useCallback(
     (world: World) => {
-      soundingWorldIdRef.current = world.id;
-      startBed(world);
-      void requestNeuralClip(world);
-      void startAmbience(world);
+      const sameWorld = soundingRef.current?.worldId === world.id;
+      startTrack(world, selectedIndex(world), 0.05);
+      if (!sameWorld) {
+        void startAmbience(world);
+      }
     },
-    [requestNeuralClip, startAmbience, startBed],
+    [selectedIndex, startAmbience, startTrack],
   );
+
+  const nextTrack = useCallback(() => {
+    const world = worldRef.current;
+    if (world.music.length < 2) {
+      return;
+    }
+    selectTrack(world, (selectedIndex(world) + 1) % world.music.length);
+
+    // Paused, booting or mid world-transition: only the selection changes.
+    const graph = graphRef.current;
+    if (!graph || !playingRef.current || soundingRef.current?.worldId !== world.id) {
+      return;
+    }
+    // Keep the outgoing track's MusicGen clip from fading in during the fade-out.
+    clipTokenRef.current += 1;
+    // A fade-out already in flight will pick up the latest selection when it lands.
+    if (switchTimerRef.current) {
+      return;
+    }
+    fadeTo(graph.music, 0, TRACK_FADE_OUT_S);
+    switchTimerRef.current = window.setTimeout(() => {
+      switchTimerRef.current = 0;
+      const current = worldRef.current;
+      const sounding = soundingRef.current;
+      if (!playingRef.current || sounding?.worldId !== current.id) {
+        return;
+      }
+      const index = selectedIndex(current);
+      if (index === sounding.index && "src" in current.music[index]) {
+        fadeTo(graph.music, 1, TRACK_FADE_IN_S);
+        return;
+      }
+      startTrack(current, index, TRACK_FADE_IN_S);
+    }, TRACK_FADE_OUT_S * 1000);
+  }, [selectTrack, selectedIndex, startTrack]);
 
   const stopEventSound = useCallback(() => {
     eventTokenRef.current += 1;
@@ -357,23 +494,23 @@ export function useAudioEngine(initialWorld: World) {
 
   const stopPlayback = useCallback(() => {
     startTokenRef.current += 1;
-    clipTokenRef.current += 1;
     startingRef.current = false;
     playingRef.current = false;
-    soundingWorldIdRef.current = null;
+    soundingRef.current = null;
     setIsPlaying(false);
-    engineRef.current?.stop();
-    stopClip();
+    stopMusic();
     stopAmbience();
     stopEventSound();
     const graph = graphRef.current;
     if (graph) {
       fadeTo(graph.clip, 0, 0.05);
-      graph.output.gain.cancelScheduledValues(graph.context.currentTime);
-      graph.output.gain.value = 1;
+      for (const stage of [graph.output, graph.music]) {
+        stage.gain.cancelScheduledValues(graph.context.currentTime);
+        stage.gain.value = 1;
+      }
     }
     setStatus("idle");
-  }, [stopAmbience, stopClip, stopEventSound]);
+  }, [stopAmbience, stopEventSound, stopMusic]);
 
   const togglePlayback = useCallback(async () => {
     // A second press while the engine is still booting cancels the start.
@@ -413,9 +550,13 @@ export function useAudioEngine(initialWorld: World) {
   const beginWorldTransition = useCallback(
     (world: World) => {
       worldRef.current = world;
-      if (soundingWorldIdRef.current !== world.id) {
+      setTrack(describeTrack(world, selectedIndex(world)));
+      if (soundingRef.current?.worldId !== world.id) {
         clipTokenRef.current += 1;
       }
+      // A pending Next switch is abandoned; finishWorldTransition settles the music.
+      window.clearTimeout(switchTimerRef.current);
+      switchTimerRef.current = 0;
       stopEventSound();
       const graph = graphRef.current;
       if (!graph) {
@@ -426,7 +567,7 @@ export function useAudioEngine(initialWorld: World) {
         fadeTo(graph.output, 0, TRANSITION_FADE_S);
       }
     },
-    [stopEventSound],
+    [selectedIndex, stopEventSound],
   );
 
   const finishWorldTransition = useCallback(
@@ -439,14 +580,19 @@ export function useAudioEngine(initialWorld: World) {
         }
         return;
       }
-      if (soundingWorldIdRef.current !== world.id) {
+      const sounding = soundingRef.current;
+      if (sounding?.worldId === world.id && sounding.index === selectedIndex(world)) {
+        if (graph) {
+          fadeTo(graph.music, 1, 0.3);
+        }
+      } else {
         startWorldAudio(world);
       }
       if (graph) {
         fadeTo(graph.output, 1, TRANSITION_FADE_S);
       }
     },
-    [startWorldAudio],
+    [selectedIndex, startWorldAudio],
   );
 
   const setVolume = useCallback((next: number) => {
@@ -521,10 +667,14 @@ export function useAudioEngine(initialWorld: World) {
       ambienceTokenRef.current += 1;
       startingRef.current = false;
       playingRef.current = false;
-      soundingWorldIdRef.current = null;
+      soundingRef.current = null;
+      window.clearTimeout(switchTimerRef.current);
+      switchTimerRef.current = 0;
       engineRef.current?.stop();
       loopRef.current?.stop(0.01);
       loopRef.current = null;
+      fileRef.current?.dispose();
+      fileRef.current = null;
       stopAmbienceVoices(voices);
       stopEventSound();
       const graph = graphRef.current;
@@ -542,7 +692,9 @@ export function useAudioEngine(initialWorld: World) {
     volume,
     status,
     ambiencePrefs,
+    track,
     togglePlayback,
+    nextTrack,
     beginWorldTransition,
     finishWorldTransition,
     setVolume,
