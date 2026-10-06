@@ -1,4 +1,4 @@
-export type WorldId = "orbital-station" | "neon-city";
+export type WorldId = "orbital-station" | "neon-city" | "centauri-a";
 
 /** Shader backdrops in `src/backdrops/shaders.ts`. Worlds may share one. */
 export type SceneBackdropId = "planet-orbit" | "neon-skyline";
