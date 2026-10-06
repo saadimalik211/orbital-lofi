@@ -25,14 +25,13 @@ export function validateWorlds(worlds: readonly World[]) {
       checkSrc("scene", world.scene.src);
     }
 
-    const musicIds = new Set<string>();
-    for (const track of world.music) {
-      if (musicIds.has(track.id)) {
-        problems.push(`${at("music")} duplicate track id "${track.id}"`);
-      }
-      musicIds.add(track.id);
-      if ("src" in track) {
-        checkSrc(`music.${track.id}`, track.src);
+    const { music } = world;
+    if (music.tempo[0] > music.tempo[1]) {
+      problems.push(`${at("music.tempo")} min > max`);
+    }
+    for (const [name, value] of Object.entries({ ...music.density, ...music.space, swing: music.swing })) {
+      if (!inUnitRange(value)) {
+        problems.push(`${at(`music.${name}`)} must be 0–1`);
       }
     }
 

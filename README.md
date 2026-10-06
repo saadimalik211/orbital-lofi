@@ -1,12 +1,11 @@
 # Orbital Lofi
 
 A cinematic sci-fi ambient listening terminal. Each world is an image, video or WebGL shader
-scene with a music playlist (audio files and/or generated tracks: an instant procedural bed
-plus an in-browser MusicGen clip), looping ambience, canvas/CSS environmental effects and
-occasional random events.
+scene with procedural lofi music (synthesized live with Web Audio from a per-world profile),
+looping ambience, canvas/CSS environmental effects and occasional random events.
 
-No backend: everything runs in the browser. Mixer levels persist in `localStorage`;
-generated clips are cached in IndexedDB.
+No backend and no music files: everything runs in the browser. Mixer levels persist in
+`localStorage`.
 
 ```bash
 npm install
@@ -25,7 +24,8 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
 | `src/components/WorldScene.tsx` | Composes the layers and wires hooks together |
 | `src/components/WorldBackdrop.tsx` | Renders the scene: image, video or shader |
 | `src/backdrops/` | WebGL shader scenes (`shaders.ts`) and their renderer |
-| `src/audio/` | Web Audio engine: music playlist (file player, procedural bed, MusicGen worker), ambience, event sounds |
+| `src/audio/` | Web Audio graph (`useAudioEngine`), ambience, event sounds |
+| `src/audio/music/` | Procedural music: seeded RNG, theory, composer, synth voices, lookahead scheduler |
 | `src/effects/` | Rain / stars / particles canvas + CSS fog and flicker |
 | `src/events/` | Event scheduler and event visuals |
 | `src/hud/`, `src/components/Hud.tsx` | HUD idle/visibility, keyboard shortcuts, controls |
@@ -33,14 +33,13 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
 ## How to add a new world
 
 1. **Pick an id.** Kebab-case, e.g. `ice-moon`. Add it to the `WorldId` union in
-   `src/worlds/types.ts`. The id is used for the asset folder and the music cache key.
+   `src/worlds/types.ts`. The id is used for the asset folder.
 
 2. **Add assets** under `public/worlds/<world-id>/`:
 
    ```
    public/worlds/ice-moon/
      scene/      background still or video: ice-moon.png, loop.mp4 …
-     music/      playlist files: ice-moon-01.mp3 …
      ambience/   looping beds: wind.wav, generator.wav …
      events/     one-shot sounds and optional flyby art: crack.wav, probe.png …
    ```
@@ -72,17 +71,17 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      name: "Ice Moon",
      year: 2203,
      scene: { type: "image", src: "/worlds/ice-moon/scene/ice-moon.png" },
-     music: [
-       { id: "ice-moon-01", title: "Glacier", src: "/worlds/ice-moon/music/ice-moon-01.mp3" },
-       {
-         id: "ice-moon-generated",
-         title: "Frost Signal",
-         generate: {
-           prompt: "glacial ambient lofi, frozen moon base, soft bells, 70 bpm, looping instrumental",
-           bed: { seed: 2203, bpm: 70, rootMidi: 55, swing: 0.55, brightness: 0.4, texture: 0.2 },
-         },
-       },
-     ],
+     music: {
+       tempo: [68, 76],
+       keys: ["E", "A"],
+       scale: "lydian",
+       progressions: ["1-4-1-4", "1-6-2-5"],
+       chords: { style: "ninth", rhythm: "sustain", barsPerChord: 2 },
+       density: { drums: 0.15, bass: 0.25, melody: 0.1 },
+       melodyScale: "full",
+       swing: 0.06,
+       space: { reverb: 0.8, brightness: 0.4, softness: 0.9 },
+     },
      ambience: [
        { id: "wind", name: "Wind", src: "/worlds/ice-moon/ambience/wind.wav", defaultVolume: 0.3 },
      ],
@@ -94,15 +93,14 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
    }
    ```
 
-   - **Music:** a playlist (at least one track) in play order. `title` is optional and shown
-     in the HUD. `Next` (shown when there are 2+ tracks) fades out, moves to the following
-     track, and fades in; the selection is remembered per world.
-     - File track `{ id, src }`: plays once (don't bake in a loop), then the playlist
-       advances. A missing/unplayable file is skipped.
-     - Generated track `{ id, generate: { prompt, bed } }`: `bed` is an instant procedural
-       groove; `prompt` renders a MusicGen clip in the browser that crossfades in. Loops until
-       Next. `brightness` (0–1) opens the filter, `texture` (0–1) adds vinyl crackle. Changing
-       the prompt invalidates the cached clip automatically.
+   - **Music:** a profile, not files. Each composition picks a tempo from `tempo`, a key from
+     `keys` and a progression (scale degrees, see `PROGRESSIONS` in
+     `src/audio/music/theory.ts`), then writes 16 looping bars of chords, bass, drums and a
+     sparse melody. Scales: `major`, `lydian`, `mixolydian`, `dorian`, `aeolian`. `density`
+     (0–1) sets how busy drums, bass and melody are; `melodyScale: "pentatonic"` restricts
+     the melody to five notes; `swing` (0–0.3) delays off-beat 16ths; `space` (0–1) sets
+     reverb amount, filter brightness and attack softness. Every world visit and every press
+     of `Next` uses a new seed; the same seed always produces the same composition.
    - **Ambience:** `id` keys the saved mixer level, so a `rain` track in two worlds shares one
      level. Use a distinct id if it should be independent. `defaultVolume` is 0–1.
    - **Effects:** each entry is optional; `intensity` is 0–1. Available: `rain`, `fog`,
@@ -115,5 +113,6 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
 5. **Check it.** `npm run dev` prints a single `World config issues` warning if ids collide,
    delays are inverted, levels are out of range, or asset paths sit outside the world's folder.
    In dev, the browser console exposes `orbitalEvents.list()` and
-   `orbitalEvents.trigger("ice-crack")` to fire events on demand. This helper isn't included
-   in production builds.
+   `orbitalEvents.trigger("ice-crack")` to fire events on demand, logs each composition
+   (`seed`, tempo, key, scale, progression, chord names), and exposes `orbitalMusic.current()`
+   and `orbitalMusic.next()`. None of these helpers are included in production builds.

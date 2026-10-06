@@ -13,39 +13,47 @@ export type SceneConfig =
 
 export type SceneType = SceneConfig["type"];
 
-export type MusicBed = {
-  seed: number;
-  bpm: number;
-  rootMidi: number;
+export type NoteName =
+  | "C" | "C#" | "D" | "Eb" | "E" | "F" | "F#" | "G" | "Ab" | "A" | "Bb" | "B";
+
+/** Seven-note modes; intervals live in `src/audio/music/theory.ts`. */
+export type ScaleName = "major" | "lydian" | "mixolydian" | "dorian" | "aeolian";
+
+/** Scale-degree progressions (1-based), resolved against the composition's key + scale. */
+export type ProgressionId =
+  | "1-4-1-4"
+  | "1-6-2-5"
+  | "2-5-1-6"
+  | "4-3-2-1"
+  | "1-6-3-7"
+  | "1-4-7-3"
+  | "1-7-6-7"
+  | "1-4-5-1";
+
+/** Procedural music style. Every composition is `compose(profile, seed)`. All 0–1 values unless noted. */
+export type MusicProfile = {
+  /** Inclusive BPM range; each seed picks one. */
+  tempo: readonly [number, number];
+  /** Candidate keys; each seed picks one. */
+  keys: readonly [NoteName, ...NoteName[]];
+  scale: ScaleName;
+  /** Candidate progressions; each seed picks one. */
+  progressions: readonly [ProgressionId, ...ProgressionId[]];
+  chords: {
+    /** triad = 3 notes, seventh = 4, ninth = root/3rd/7th/9th. */
+    style: "triad" | "seventh" | "ninth";
+    /** sustain = one long chord per change; pulse = syncopated restrikes every bar. */
+    rhythm: "sustain" | "pulse";
+    barsPerChord: 1 | 2;
+  };
+  density: { drums: number; bass: number; melody: number };
+  /** pentatonic keeps the melody on the 5 most consonant scale degrees. */
+  melodyScale: "full" | "pentatonic";
+  /** Delay of off-beat 16ths, as a fraction of a 16th (0–0.3 is musical). */
   swing: number;
-  /** 0–1: low-pass cutoff and chord voicing brightness. */
-  brightness: number;
-  /** 0–1: vinyl crackle level. */
-  texture: number;
+  /** reverb = wet send; brightness = low-pass openness; softness = slower attacks. */
+  space: { reverb: number; brightness: number; softness: number };
 };
-
-export type GeneratedMusic = {
-  /** MusicGen text prompt for the generated clip. */
-  prompt: string;
-  /** Procedural bed that plays instantly while the clip renders. */
-  bed: MusicBed;
-};
-
-type TrackBase = {
-  id: string;
-  title?: string;
-};
-
-/** Audio file in `public/worlds/<world-id>/music/`. Plays once, then the playlist advances. */
-export type FileMusicTrack = TrackBase & { src: string };
-
-/** Procedural bed + in-browser MusicGen clip. Loops until Next or a world change. */
-export type GeneratedMusicTrack = TrackBase & { generate: GeneratedMusic };
-
-export type MusicTrack = FileMusicTrack | GeneratedMusicTrack;
-
-/** Playlist in play order; at least one track. */
-export type WorldMusic = readonly [MusicTrack, ...MusicTrack[]];
 
 export type AmbienceTrack = {
   id: string;
@@ -119,7 +127,7 @@ export type World = {
   name: string;
   year: number;
   scene: SceneConfig;
-  music: WorldMusic;
+  music: MusicProfile;
   ambience: AmbienceTrack[];
   effects: WorldEffects;
   events: WorldEvent[];
