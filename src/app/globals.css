@@ -37,6 +37,33 @@ body {
   animation: now-playing-in 400ms ease;
 }
 
+.now-playing-led {
+  width: 0.34rem;
+  height: 0.34rem;
+  margin-right: 0.45rem;
+  border-radius: 999px;
+  background: #9dffe0;
+  opacity: 0.4;
+  flex: none;
+}
+
+.now-playing-led-live {
+  opacity: 1;
+  animation: now-playing-led 2s ease-in-out infinite;
+}
+
+@keyframes now-playing-led {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 @keyframes now-playing-in {
   from {
     opacity: 0.4;
@@ -527,6 +554,7 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .hud-shell,
   .now-playing-meta,
+  .now-playing-led-live,
   .hud-reveal,
   .hud-btn,
   .hud-slider,
