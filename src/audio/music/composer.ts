@@ -52,6 +52,9 @@ export type Composition = {
   swing: number;
   tape: { depth: number; wowRate: number; flutterRate: number };
   space: MusicProfile["space"];
+  /** Copied from the profile. Not drawn from the composition random stream. */
+  reverb: MusicProfile["reverb"];
+  sound: MusicProfile["sound"];
   sections: SectionMark[];
   chords: ChordEvent[];
   bass: NoteEvent[];
@@ -563,6 +566,8 @@ export function compose(profile: MusicProfile, seed: number): Composition {
     swing: clamp(groove.swing ?? 0, 0, 0.3),
     tape,
     space: profile.space,
+    reverb: profile.reverb,
+    sound: profile.sound,
     sections: sections.map((s) => ({
       kind: s.kind,
       step: s.startBar * STEPS_PER_BAR,

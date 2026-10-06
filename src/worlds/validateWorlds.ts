@@ -29,10 +29,26 @@ export function validateWorlds(worlds: readonly World[]) {
     if (music.tempo[0] > music.tempo[1]) {
       problems.push(`${at("music.tempo")} min > max`);
     }
-    for (const [name, value] of Object.entries({ ...music.density, ...music.space, tape: music.tape ?? 0 })) {
-      if (!inUnitRange(value)) {
-        problems.push(`${at(`music.${name}`)} must be 0–1`);
+    for (const [group, values] of [
+      ["", { ...music.density, ...music.space, tape: music.tape ?? 0 }],
+      ["sound.", music.sound],
+    ] as const) {
+      for (const [name, value] of Object.entries(values)) {
+        if (!inUnitRange(value)) {
+          problems.push(`${at(`music.${group}${name}`)} must be 0–1`);
+        }
       }
+    }
+    const { reverb } = music;
+    if (!inUnitRange(reverb.amount) || !inUnitRange(reverb.damping)) {
+      problems.push(`${at("music.reverb")} amount and damping must be 0–1`);
+    }
+    if (reverb.decay < 0.4 || reverb.decay > 4.5) {
+      problems.push(`${at("music.reverb.decay")} must be 0.4–4.5 seconds`);
+    }
+    const preDelay = reverb.preDelay ?? 0;
+    if (preDelay < 0 || preDelay > 0.08) {
+      problems.push(`${at("music.reverb.preDelay")} must be 0–0.08 seconds`);
     }
     const groove = music.groove ?? {};
     for (const [name, value, max] of [

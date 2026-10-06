@@ -47,8 +47,36 @@ export type MusicSection = {
   variation?: boolean;
   /** Multiplies `space.brightness` (e.g. 0.5 for a filtered intro). Default 1. */
   tone?: number;
-  /** Multiplies `space.reverb`. Default 1. */
+  /** Multiplies `reverb.amount`. Default 1. */
   wet?: number;
+};
+
+/** Generated room. The impulse is built in the engine; no sample files. */
+export type MusicReverb = {
+  /** Wet send, 0–1. Sections scale it with `wet`. */
+  amount: number;
+  /** Tail length in seconds (about 0.4–4). */
+  decay: number;
+  /** 0 = brighter return, 1 = darker. */
+  damping: number;
+  /** Silence before the tail, in seconds (0–0.08). */
+  preDelay?: number;
+};
+
+/** Timbre. 0–1. The engine never branches on which world is playing. */
+export type MusicSound = {
+  /** 1 = soft body, almost no click. 0 = a clearer short transient. */
+  kickSoftness: number;
+  /** Higher is a bit brighter, still a soft snare. */
+  snareBrightness: number;
+  /** Higher opens the hat filter a little. */
+  hatBrightness: number;
+  /** 1 = sine-heavy mellow keys. 0 = a little more harmonic edge. */
+  chordWarmth: number;
+  /** How far the lead filter opens. */
+  leadBrightness: number;
+  /** Vinyl-style noise under the music. Even 1 stays very quiet. */
+  textureAmount: number;
 };
 
 /** Procedural music style. Every composition is `compose(profile, seed)`. All 0–1 values unless noted. */
@@ -71,8 +99,15 @@ export type MusicProfile = {
   density: { drums: number; bass: number; melody: number };
   /** pentatonic keeps the melody on the 5 most consonant scale degrees. */
   melodyScale: "full" | "pentatonic";
-  /** reverb = wet send; brightness = low-pass openness; softness = slower attacks. */
-  space: { reverb: number; brightness: number; softness: number };
+  /** brightness = low-pass openness; softness = slower attacks. */
+  space: { brightness: number; softness: number };
+  reverb: MusicReverb;
+  sound: MusicSound;
+  /**
+   * Where a manual Next begins. `"main"` skips to the first A section so the intro
+   * isn't replayed on every press. Playback and world changes still start at the intro.
+   */
+  nextStartMode?: "intro" | "main";
   /** Song form, played in order and then looped. */
   form: readonly [MusicSection, ...MusicSection[]];
   groove?: {

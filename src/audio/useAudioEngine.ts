@@ -203,13 +203,13 @@ export function useAudioEngine(initialWorld: World) {
 
   /** Replaces whatever is playing with `composition`, ramping the music stage back up. */
   const startMusic = useCallback(
-    (worldId: WorldId, composition: Composition, fadeInSeconds: number) => {
+    (worldId: WorldId, composition: Composition, fadeInSeconds: number, fromStep = 0) => {
       const graph = graphRef.current;
       if (!graph) {
         return;
       }
       clearNextTimer();
-      graph.engine.play(composition);
+      graph.engine.play(composition, fromStep);
       soundingRef.current = { worldId, composition };
       fadeTo(graph.music, 1, fadeInSeconds);
     },
@@ -247,7 +247,12 @@ export function useAudioEngine(initialWorld: World) {
       const current = worldRef.current;
       const queued = compositionRef.current;
       if (playingRef.current && queued && soundingRef.current?.worldId === current.id) {
-        startMusic(current.id, queued, NEXT_FADE_IN_S);
+        // Manual Next can skip the intro; Play and world changes still begin at step 0.
+        const fromStep =
+          current.music.nextStartMode === "main"
+            ? (queued.sections.find((section) => section.kind === "a")?.step ?? 0)
+            : 0;
+        startMusic(current.id, queued, NEXT_FADE_IN_S, fromStep);
       }
     }, NEXT_FADE_OUT_S * 1000);
   }, [startMusic]);

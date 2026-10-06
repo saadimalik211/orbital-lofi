@@ -79,7 +79,13 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
        chords: { style: "ninth", rhythm: "sustain", barsPerChord: 2 },
        density: { drums: 0.15, bass: 0.25, melody: 0.1 },
        melodyScale: "full",
-       space: { reverb: 0.8, brightness: 0.4, softness: 0.9 },
+       space: { brightness: 0.4, softness: 0.9 },
+       reverb: { amount: 0.8, decay: 3.2, damping: 0.7, preDelay: 0.02 },
+       sound: {
+         kickSoftness: 0.8, snareBrightness: 0.3, hatBrightness: 0.3,
+         chordWarmth: 0.8, leadBrightness: 0.35, textureAmount: 0.05,
+       },
+       nextStartMode: "main",
        form: [
          { kind: "intro", bars: 8, drums: 0, bass: 0, melody: 0, tone: 0.7 },
          { kind: "a", bars: 8, drums: 0.5, bass: 0.8, melody: 0 },
@@ -106,19 +112,25 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      `src/audio/music/theory.ts`), then arranges chords, bass, drums and a sparse melody over
      the `form`, which loops. Scales: `major`, `lydian`, `mixolydian`, `dorian`, `aeolian`.
      `density` (0–1) is each layer's peak busyness; `melodyScale: "pentatonic"` restricts the
-     melody to five notes; `space` (0–1) sets reverb amount, filter brightness and attack
-     softness. Every world visit and every press of `Next` uses a new seed; the same seed
-     always produces the same composition.
+     melody to five notes; `space` sets filter brightness and attack softness (both 0–1).
+     Every world visit and every press of `Next` uses a new seed; the same seed always
+     produces the same notes.
      - `form`: sections share key, groove and the melody motif. `a` sections use the main
        progression, `b` a second one from `progressions`. Layer levels (0–1) scale `density`;
        0 silences a layer. Drums below 0.5 are hats only, below 0.75 a basic kick/snare/hat,
        0.95+ adds pickups and open hats. `variation` re-voices chords and varies the motif;
-       `tone`/`wet` multiply brightness/reverb for that section. Keep `bars` a multiple of one
-       progression pass (4 × `barsPerChord`).
+       `tone`/`wet` multiply brightness and reverb amount for that section. Keep `bars` a multiple
+       of one progression pass (4 × `barsPerChord`).
      - `groove`: `swing` (0–0.3) delays off-beat 16ths; `timingHumanization` (seconds, ≤ 0.03)
        lets notes off the downbeat sit slightly late; `velocityHumanization` (0–0.3) varies
        gain, mostly on hats, bass, chords and melody.
      - `tape` (0–1): wow/flutter pitch wobble on the music bus; 0.3 is barely audible.
+     - `reverb`: `amount` (0–1) is the wet send, `decay` is the tail in seconds, `damping`
+       (0–1) darkens it, `preDelay` (seconds, ≤ 0.08) is the gap before the tail.
+     - `sound` (all 0–1): kick softness, snare and hat brightness, chord warmth, lead brightness,
+       and `textureAmount` for a very quiet noise bed under the music.
+     - `nextStartMode`: `"main"` makes the Next button enter at the first A section. Pressing
+       Play, and changing worlds, still starts at the intro.
    - **Ambience:** `id` keys the saved mixer level, so a `rain` track in two worlds shares one
      level. Use a distinct id if it should be independent. `defaultVolume` is 0–1.
    - **Effects:** each entry is optional; `intensity` is 0–1. Available: `rain`, `fog`,
