@@ -2,7 +2,7 @@ import { AmbienceMixer } from "@/components/AmbienceMixer";
 import { WorldSelector } from "@/components/WorldSelector";
 import type { AmbiencePrefs } from "@/audio/ambiencePrefs";
 import { formatTempoKey, signalId, type NowPlayingInfo } from "@/audio/music/nowPlaying";
-import type { AudioEngineStatus } from "@/audio/useAudioEngine";
+import type { AudioEngineStatus, AiSourceStatus } from "@/audio/useAudioEngine";
 import type { World, WorldId } from "@/worlds/types";
 
 type HudProps = {
@@ -11,6 +11,7 @@ type HudProps = {
   selectedWorldId: WorldId;
   isPlaying: boolean;
   status: AudioEngineStatus;
+  musicSource: AiSourceStatus;
   nowPlaying: NowPlayingInfo | null;
   volume: number;
   visible: boolean;
@@ -25,14 +26,42 @@ type HudProps = {
   onAmbienceMuteToggle: (trackId: string) => void;
 };
 
+function sourceLabel(source: AiSourceStatus) {
+  if (source === "enhanced") {
+    return "AI Enhanced";
+  }
+  if (source === "generating") {
+    return "Generating";
+  }
+  if (source === "unavailable") {
+    return "Unavailable";
+  }
+  return "Procedural";
+}
+
+function sourceClass(source: AiSourceStatus) {
+  if (source === "enhanced") {
+    return "text-[#9dffe0]";
+  }
+  if (source === "generating") {
+    return "now-playing-source-wait text-[#9dffe0]";
+  }
+  if (source === "unavailable") {
+    return "text-[#6f8f80]";
+  }
+  return "text-[#7f9a8e]";
+}
+
 function NowPlaying({
   world,
   info,
   playing,
+  musicSource,
 }: {
   world: World;
   info: NowPlayingInfo | null;
   playing: boolean;
+  musicSource: AiSourceStatus;
 }) {
   const live = info?.worldId === world.id ? info : null;
   return (
@@ -54,6 +83,13 @@ function NowPlaying({
         <p className="mt-0.5 font-mono text-[10px] tracking-[0.16em] text-[#7f9a8e] uppercase">
           {live ? formatTempoKey(live) : "Standby"}
         </p>
+        {live ? (
+          <p
+            className={`mt-0.5 font-mono text-[10px] tracking-[0.16em] uppercase ${sourceClass(musicSource)}`}
+          >
+            {sourceLabel(musicSource)}
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -72,6 +108,7 @@ export function Hud({
   selectedWorldId,
   isPlaying,
   status,
+  musicSource,
   nowPlaying,
   volume,
   visible,
@@ -122,7 +159,7 @@ export function Hud({
         </header>
 
         <footer className="pointer-events-auto flex max-w-full flex-col gap-4 sm:gap-5">
-          <NowPlaying world={world} info={nowPlaying} playing={isPlaying} />
+          <NowPlaying world={world} info={nowPlaying} playing={isPlaying} musicSource={musicSource} />
 
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
             <button

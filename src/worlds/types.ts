@@ -81,6 +81,8 @@ export type MusicSound = {
 
 /** Procedural music style. Every composition is `compose(profile, seed)`. All 0–1 values unless noted. */
 export type MusicProfile = {
+  /** Text prompt for the optional AI clip. The procedural engine does not read this. */
+  prompt: string;
   /** Inclusive BPM range; each seed picks one. */
   tempo: readonly [number, number];
   /** Candidate keys; each seed picks one. */

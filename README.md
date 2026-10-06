@@ -72,6 +72,7 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      year: 2203,
      scene: { type: "image", src: "/worlds/ice-moon/scene/ice-moon.png" },
      music: {
+       prompt: "cold sparse ambient lofi, glassy keys, distant drones, thin air",
        tempo: [68, 76],
        keys: ["E", "A"],
        scale: "lydian",
@@ -114,7 +115,8 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      `density` (0–1) is each layer's peak busyness; `melodyScale: "pentatonic"` restricts the
      melody to five notes; `space` sets filter brightness and attack softness (both 0–1).
      Every world visit and every press of `Next` uses a new seed; the same seed always
-     produces the same notes.
+     produces the same notes. `prompt` is only for the optional in-browser AI clip, which
+     crossfades in after Play; the procedural piece never waits on it.
      - `form`: sections share key, groove and the melody motif. `a` sections use the main
        progression, `b` a second one from `progressions`. Layer levels (0–1) scale `density`;
        0 silences a layer. Drums below 0.5 are hats only, below 0.75 a basic kick/snare/hat,

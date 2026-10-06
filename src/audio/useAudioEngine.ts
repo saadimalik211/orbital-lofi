@@ -22,14 +22,17 @@ import {
   subscribeAmbiencePrefs,
   updateAmbiencePrefs,
 } from "@/audio/ambiencePrefs";
+import { createAiMusic, type AiMusic, type AiSourceStatus } from "@/audio/ai/aiMusic";
 import { compose, describeComposition, type Composition } from "@/audio/music/composer";
 import { describeSilence } from "@/audio/music/silence";
 import { createMusicEngine, type MusicEngine } from "@/audio/music/musicEngine";
 import { type NowPlayingInfo } from "@/audio/music/nowPlaying";
 import { randomSeed } from "@/audio/music/random";
 import type { World, WorldId } from "@/worlds/types";
+import { getWorldById } from "@/worlds/worlds";
 
 export type AudioEngineStatus = "idle" | "live" | "error";
+export type { AiSourceStatus };
 
 const DEFAULT_VOLUME = 0.55;
 const TRANSITION_FADE_S = 0.55;
@@ -41,6 +44,8 @@ type MusicDevHandle = {
   current: () => string | null;
   /** Score silence for the current piece. Development only. */
   silence: () => string | null;
+  /** Procedural, generating, enhanced, or unavailable. Development only. */
+  ai: () => string;
   next: () => void;
 };
 
@@ -51,8 +56,9 @@ declare global {
 }
 
 /**
- * procedural music → music (Next fades) ┐
- *        ambience / event sounds        ┴→ master (user volume) → output (transition fade) → speakers
+ * procedural ─┐
+ * ai clip    ─┴→ music (Next fades) ┐
+ *        ambience / event sounds    ┴→ master (user volume) → output (transition fade) → speakers
  */
 type AudioGraph = {
   context: AudioContext;
@@ -61,11 +67,12 @@ type AudioGraph = {
   music: GainNode;
   ambience: GainNode;
   engine: MusicEngine;
+  ai: AiMusic;
 };
 
 type Sounding = { worldId: WorldId; composition: Composition };
 
-function createGraph(volume: number): AudioGraph {
+function createGraph(volume: number, onAiStatus: (status: AiSourceStatus) => void): AudioGraph {
   const context = new AudioContext();
   const gain = (value: number) => {
     const node = context.createGain();
@@ -76,11 +83,33 @@ function createGraph(volume: number): AudioGraph {
   const output = gain(1);
   const music = gain(1);
   const ambience = gain(1);
+  const procedural = gain(1);
+  const aiBus = gain(0);
+  procedural.connect(music);
+  aiBus.connect(music);
   music.connect(master);
   ambience.connect(master);
   master.connect(output);
   output.connect(context.destination);
-  return { context, master, output, music, ambience, engine: createMusicEngine(context, music) };
+  return {
+    context,
+    master,
+    output,
+    music,
+    ambience,
+    engine: createMusicEngine(context, procedural),
+    ai: createAiMusic(
+      context,
+      procedural,
+      aiBus,
+      (message) => {
+        if (isDev) {
+          console.info(`[orbital-lofi] ${message}`);
+        }
+      },
+      onAiStatus,
+    ),
+  };
 }
 
 function fadeTo(gain: GainNode, value: number, seconds = 0.85) {
@@ -113,6 +142,7 @@ export function useAudioEngine(initialWorld: World) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolumeState] = useState(DEFAULT_VOLUME);
   const [status, setStatus] = useState<AudioEngineStatus>("idle");
+  const [musicSource, setMusicSource] = useState<AiSourceStatus>("procedural");
   const [nowPlaying, setNowPlaying] = useState<NowPlayingInfo | null>(null);
   const ambiencePrefs = useSyncExternalStore(
     subscribeAmbiencePrefs,
@@ -144,7 +174,7 @@ export function useAudioEngine(initialWorld: World) {
   const eventTokenRef = useRef(0);
 
   const ensureGraph = useCallback(async () => {
-    const graph = (graphRef.current ??= createGraph(volumeRef.current));
+    const graph = (graphRef.current ??= createGraph(volumeRef.current, setMusicSource));
     // Called synchronously inside the click/keypress so autoplay policy allows it.
     const resumed = graph.context.resume().catch(() => {});
     if (graph.context.state !== "running") {
@@ -231,6 +261,11 @@ export function useAudioEngine(initialWorld: World) {
       soundingRef.current = { worldId, composition };
       setNowPlaying(snapshot(worldId, composition));
       fadeTo(graph.music, 1, fadeInSeconds);
+      graph.ai.engage({
+        worldId,
+        seed: composition.seed,
+        prompt: getWorldById(worldId).music.prompt,
+      });
     },
     [clearNextTimer],
   );
@@ -250,6 +285,11 @@ export function useAudioEngine(initialWorld: World) {
   const nextComposition = useCallback(() => {
     const world = worldRef.current;
     compositionRef.current = composeFor(world, compositionRef.current?.seed);
+    graphRef.current?.ai.retarget({
+      worldId: world.id,
+      seed: compositionRef.current.seed,
+      prompt: world.music.prompt,
+    });
 
     // Paused, starting, or mid world-transition: only the queued composition changes.
     const graph = graphRef.current;
@@ -354,6 +394,7 @@ export function useAudioEngine(initialWorld: World) {
     stopEventSound();
     const graph = graphRef.current;
     if (graph) {
+      graph.ai.suspend();
       graph.engine.stop();
       for (const stage of [graph.output, graph.music]) {
         stage.gain.cancelScheduledValues(graph.context.currentTime);
@@ -404,6 +445,11 @@ export function useAudioEngine(initialWorld: World) {
       worldRef.current = world;
       // Every world visit gets a fresh composition from that world's profile.
       compositionRef.current = composeFor(world, compositionRef.current?.seed);
+      graphRef.current?.ai.retarget({
+        worldId: world.id,
+        seed: compositionRef.current.seed,
+        prompt: world.music.prompt,
+      });
       // A pending Next is abandoned; finishWorldTransition starts the new composition.
       clearNextTimer();
       stopEventSound();
@@ -496,6 +542,7 @@ export function useAudioEngine(initialWorld: World) {
         const composition = soundingRef.current?.composition ?? compositionRef.current;
         return composition ? describeSilence(composition) : null;
       },
+      ai: () => graphRef.current?.ai.status() ?? "procedural",
       next: nextComposition,
     };
     window.orbitalMusic = handle;
@@ -520,6 +567,7 @@ export function useAudioEngine(initialWorld: World) {
       stopEventSound();
       const graph = graphRef.current;
       graphRef.current = null;
+      graph?.ai.dispose();
       graph?.engine.dispose();
       void graph?.context.close().catch(() => {});
       setIsPlaying(false);
@@ -531,6 +579,7 @@ export function useAudioEngine(initialWorld: World) {
     isPlaying,
     volume,
     status,
+    musicSource,
     nowPlaying,
     ambiencePrefs,
     togglePlayback,

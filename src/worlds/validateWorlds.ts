@@ -26,6 +26,9 @@ export function validateWorlds(worlds: readonly World[]) {
     }
 
     const { music } = world;
+    if (!music.prompt.trim()) {
+      problems.push(`${at("music.prompt")} must be non-empty`);
+    }
     if (music.tempo[0] > music.tempo[1]) {
       problems.push(`${at("music.tempo")} min > max`);
     }
