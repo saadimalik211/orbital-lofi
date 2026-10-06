@@ -173,11 +173,10 @@ function buildChords(
         }
       } else if (changes) {
         let bars = 1;
-        while (
-          bar + bars < section.bars &&
-          section.degrees[bar + bars] === degree &&
-          bars < profile.chords.barsPerChord
-        ) {
+        // Hold the chord for the whole run of this degree. Capping at `barsPerChord`
+        // drops the attack when a variation turnaround repeats the previous harmony,
+        // leaving those bars with no chord at all.
+        while (bar + bars < section.bars && section.degrees[bar + bars] === degree) {
           bars += 1;
         }
         const arpeggio = arpeggioSection && rng.chance(0.4 + softness * 0.4);

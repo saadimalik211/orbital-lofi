@@ -23,6 +23,7 @@ import {
   updateAmbiencePrefs,
 } from "@/audio/ambiencePrefs";
 import { compose, describeComposition, type Composition } from "@/audio/music/composer";
+import { describeSilence } from "@/audio/music/silence";
 import { createMusicEngine, type MusicEngine } from "@/audio/music/musicEngine";
 import { type NowPlayingInfo } from "@/audio/music/nowPlaying";
 import { randomSeed } from "@/audio/music/random";
@@ -38,6 +39,8 @@ const isDev = process.env.NODE_ENV !== "production";
 
 type MusicDevHandle = {
   current: () => string | null;
+  /** Score silence for the current piece. Development only. */
+  silence: () => string | null;
   next: () => void;
 };
 
@@ -91,6 +94,7 @@ function composeFor(world: World, previousSeed?: number) {
   const composition = compose(world.music, randomSeed(previousSeed));
   if (isDev) {
     console.info(`[orbital-lofi] music ${world.id}: ${describeComposition(composition)}`);
+    console.info(describeSilence(composition));
   }
   return composition;
 }
@@ -487,6 +491,10 @@ export function useAudioEngine(initialWorld: World) {
       current: () => {
         const composition = soundingRef.current?.composition ?? compositionRef.current;
         return composition ? describeComposition(composition) : null;
+      },
+      silence: () => {
+        const composition = soundingRef.current?.composition ?? compositionRef.current;
+        return composition ? describeSilence(composition) : null;
       },
       next: nextComposition,
     };
