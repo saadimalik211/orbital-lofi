@@ -92,6 +92,10 @@ export function validateWorlds(worlds: readonly World[]) {
     if (fogColor && !fogColor.every((channel) => channel >= 0 && channel <= 255)) {
       problems.push(`${at("effects.fog.color")} channels must be 0–255`);
     }
+    const particleColor = world.effects.particles?.color;
+    if (particleColor && !particleColor.every((channel) => channel >= 0 && channel <= 255)) {
+      problems.push(`${at("effects.particles.color")} channels must be 0–255`);
+    }
 
     const eventIds = new Set<string>();
     for (const event of world.events) {

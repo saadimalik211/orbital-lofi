@@ -137,7 +137,8 @@ export type WorldEffects = {
   rain?: { intensity: number };
   /** `color` tints both haze gradients. Intensity still sets the layer opacity. */
   fog?: { intensity: number; color: Rgb };
-  particles?: { type: ParticleKind; intensity: number };
+  /** `color` tints `atmosphere` specks. Dust and snow keep their own colors. */
+  particles?: { type: ParticleKind; intensity: number; color?: Rgb };
   stars?: { intensity: number };
   flicker?: { intensity: number; style?: FlickerStyle };
 };

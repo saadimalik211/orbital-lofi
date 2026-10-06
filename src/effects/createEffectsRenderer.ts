@@ -161,7 +161,7 @@ export function createEffectsRenderer(
         ? "196, 168, 122"
         : particleType === "snow"
           ? "226, 236, 242"
-          : "186, 210, 214";
+          : (particles?.color?.join(", ") ?? "186, 210, 214");
     for (const speck of specks) {
       ctx.fillStyle = `rgba(${tint}, ${speck.a * particleIntensity})`;
       ctx.beginPath();

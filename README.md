@@ -134,7 +134,8 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
    - **Ambience:** `id` keys the saved mixer level, so a `rain` track in two worlds shares one
      level. Use a distinct id if it should be independent. `defaultVolume` is 0–1.
    - **Effects:** each entry is optional; `intensity` is 0–1. Available: `rain`, `fog`
-     (`color` is an `[r, g, b]` haze tint), `stars`, `particles` (`dust` | `snow` | `atmosphere`),
+     (`color` is an `[r, g, b]` haze tint), `stars`, `particles` (`dust` | `snow` | `atmosphere`;
+     optional `color` tints atmosphere specks only),
      `flicker` (`screen` | `neon`).
    - **Events:** `flyby`, `streak`, `pulse` (`beacon` | `glitch` | `flash`) or `sound`.
      Timing is in ms: the next event is scheduled `minDelay`–`maxDelay` after the previous one,

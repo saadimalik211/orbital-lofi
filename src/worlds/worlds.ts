@@ -64,6 +64,7 @@ export const worlds: World[] = [
     ],
     effects: {
       stars: { intensity: 0.22 },
+      particles: { type: "atmosphere", intensity: 0.14, color: [180, 205, 215] },
       fog: { intensity: 0.1, color: [186, 210, 214] },
       flicker: { intensity: 0.05, style: "screen" },
     },
@@ -176,6 +177,7 @@ export const worlds: World[] = [
     ],
     effects: {
       rain: { intensity: 0.78 },
+      particles: { type: "atmosphere", intensity: 0.12, color: [185, 170, 220] },
       fog: { intensity: 0.24, color: [170, 164, 214] },
       flicker: { intensity: 0.12, style: "neon" },
     },
@@ -298,7 +300,7 @@ export const worlds: World[] = [
       },
     ],
     effects: {
-      particles: { type: "dust", intensity: 0.32 },
+      particles: { type: "atmosphere", intensity: 0.32, color: [205, 160, 105] },
       fog: { intensity: 0.28, color: [196, 148, 88] },
       stars: { intensity: 0.06 },
     },
