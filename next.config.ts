@@ -1,5 +1,12 @@
 import type { NextConfig } from "next";
 
-const nextConfig: NextConfig = {};
+/** Set in CI for a project site (`/repo-name`). Omit for local dev and domain-root Pages. */
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH || undefined;
+
+const nextConfig: NextConfig = {
+  output: "export",
+  images: { unoptimized: true },
+  ...(basePath ? { basePath } : {}),
+};
 
 export default nextConfig;

@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useEffect, useRef } from "react";
 import { createBackdropRenderer } from "@/backdrops/createBackdropRenderer";
+import { publicPath } from "@/lib/publicPath";
 import type { SceneBackdropId, SceneConfig } from "@/worlds/types";
 
 type WorldBackdropProps = {
@@ -29,7 +30,7 @@ export function WorldBackdrop({ scene, onReady }: WorldBackdropProps) {
   if (scene.type === "image") {
     return (
       <Image
-        src={scene.src}
+        src={publicPath(scene.src)}
         alt=""
         aria-hidden
         fill
@@ -47,8 +48,8 @@ export function WorldBackdrop({ scene, onReady }: WorldBackdropProps) {
   if (scene.type === "video") {
     return (
       <video
-        src={scene.src}
-        poster={scene.poster}
+        src={publicPath(scene.src)}
+        poster={scene.poster ? publicPath(scene.poster) : undefined}
         autoPlay
         muted
         loop

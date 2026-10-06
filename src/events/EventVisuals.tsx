@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { publicPath } from "@/lib/publicPath";
 import { rgbVar, type StyleWithVars } from "@/lib/styleVars";
 import type { FlybyEvent, PulseEvent, Rgb, StreakEvent } from "@/worlds/types";
 
@@ -37,7 +38,7 @@ export function FlybyVisual({
         // eslint-disable-next-line @next/next/no-img-element
         <img
           className="evt-flyby-img"
-          src={event.asset}
+          src={publicPath(event.asset)}
           alt=""
           draggable={false}
           onError={() => {

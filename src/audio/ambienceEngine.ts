@@ -1,3 +1,4 @@
+import { publicPath } from "@/lib/publicPath";
 import type { AmbienceTrack, World } from "@/worlds/types";
 
 const bufferCache = new Map<string, Promise<AudioBuffer>>();
@@ -20,12 +21,13 @@ function warnMissing(src: string, error: unknown) {
 
 /** Fetches and decodes a sound once per `src`. Failed loads are retried next call. */
 export function loadAudioBuffer(context: BaseAudioContext, src: string) {
-  const cached = bufferCache.get(src);
+  const url = publicPath(src);
+  const cached = bufferCache.get(url);
   if (cached) {
     return cached;
   }
 
-  const pending = fetch(src)
+  const pending = fetch(url)
     .then((response) => {
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -34,12 +36,12 @@ export function loadAudioBuffer(context: BaseAudioContext, src: string) {
     })
     .then((data) => context.decodeAudioData(data))
     .catch((error: unknown) => {
-      bufferCache.delete(src);
-      warnMissing(src, error);
+      bufferCache.delete(url);
+      warnMissing(url, error);
       throw error;
     });
 
-  bufferCache.set(src, pending);
+  bufferCache.set(url, pending);
   return pending;
 }
 
