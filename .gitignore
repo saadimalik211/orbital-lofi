@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local MusicGen weights and environment
+/scripts/generate-music/.venv/
+/scripts/generate-music/.cache/

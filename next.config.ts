@@ -7,8 +7,6 @@ const nextConfig: NextConfig = {
   output: "export",
   images: { unoptimized: true },
   ...(basePath ? { basePath } : {}),
-  // The MusicGen runtime is loaded only inside the audio worker, never on the server.
-  serverExternalPackages: ["@huggingface/transformers"],
 };
 
 export default nextConfig;

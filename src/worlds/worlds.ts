@@ -1,5 +1,6 @@
 import type { World, WorldId } from "./types";
 import { validateWorlds } from "./validateWorlds";
+import musicPrompts from "./musicPrompts.json";
 
 /**
  * Assets live under `public/worlds/<world-id>/{scene,ambience,events}/`.
@@ -12,7 +13,7 @@ export const worlds: World[] = [
     year: 2187,
     scene: { type: "image", src: "/worlds/orbital-station/scene/orbital-station.png" },
     music: {
-      prompt: "slow spacious ambient lofi, warm electric keys, sparse drums, deep-space atmosphere",
+      prompt: musicPrompts["orbital-station"],
       tempo: [66, 78],
       keys: ["D", "E", "F", "G", "A"],
       scale: "major",
@@ -126,7 +127,7 @@ export const worlds: World[] = [
     year: 2194,
     scene: { type: "image", src: "/worlds/neon-city/scene/neon-city.png" },
     music: {
-      prompt: "rainy future-jazz lofi, swung drums, warm bass, neon nocturnal mood",
+      prompt: musicPrompts["neon-city"],
       tempo: [80, 94],
       keys: ["C", "D", "F", "G", "A"],
       scale: "aeolian",
@@ -245,7 +246,7 @@ export const worlds: World[] = [
     year: 2247,
     scene: { type: "image", src: "/worlds/centauri-a/scene/centauri-a.png" },
     music: {
-      prompt: "minimal frontier ambient lofi, sparse percussion, open modal chords, mysterious desert outpost",
+      prompt: musicPrompts["centauri-a"],
       tempo: [58, 72],
       keys: ["D", "E", "G", "A", "C"],
       scale: "dorian",

@@ -46,11 +46,6 @@ type MusicDevHandle = {
   silence: () => string | null;
   /** Audible music source. Development only. */
   source: () => MusicSource;
-  /**
-   * Render one MusicGen clip and download a wav. Development only.
-   * Save it under `public/worlds/<id>/music/ai/` and list it on `aiMusic`.
-   */
-  generate: (prompt: string) => Promise<void>;
   next: () => void;
 };
 
@@ -540,20 +535,6 @@ export function useAudioEngine(initialWorld: World) {
         return composition ? describeSilence(composition) : null;
       },
       source: () => graphRef.current?.ai.source() ?? "procedural",
-      generate: async (prompt) => {
-        const [{ requestMusicClip }, { downloadWav }] = await Promise.all([
-          import("@/audio/ai/musicgenClient"),
-          import("@/audio/ai/saveWav"),
-        ]);
-        const clip = await requestMusicClip(Date.now(), prompt, (status) => {
-          console.info(`[orbital-lofi] ai ${status}`);
-        });
-        if (!clip) {
-          return;
-        }
-        downloadWav(clip.samples, clip.sampleRate, "ai-track.wav");
-        console.info("[orbital-lofi] saved ai-track.wav");
-      },
       next: nextComposition,
     };
     window.orbitalMusic = handle;

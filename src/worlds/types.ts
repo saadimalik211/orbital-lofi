@@ -81,7 +81,7 @@ export type MusicSound = {
 
 /** Procedural music style. Every composition is `compose(profile, seed)`. All 0–1 values unless noted. */
 export type MusicProfile = {
-  /** Prompt for offline track generation. Playback does not read this. */
+  /** Offline generation prompt. The text lives in `musicPrompts.json`. Playback does not read this. */
   prompt: string;
   /** Inclusive BPM range; each seed picks one. */
   tempo: readonly [number, number];

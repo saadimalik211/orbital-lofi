@@ -6,10 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "generate-music": "scripts/generate-music/run.sh"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.3.1",
     "next": "16.3.8",
     "react": "19.2.8",
     "react-dom": "19.2.8"

@@ -118,9 +118,10 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      `density` (0–1) is each layer's peak busyness; `melodyScale: "pentatonic"` restricts the
      melody to five notes; `space` sets filter brightness and attack softness (both 0–1).
      Every world visit and every press of `Next` uses a new seed; the same seed always
-     produces the same notes. `prompt` is for generating tracks ahead of time. Optional `aiMusic`
-     lists shipped files under `public/worlds/<id>/music/ai/`. Playback uses those files when
-     they are present and otherwise stays on the procedural piece. It does not run a model.
+     produces the same notes. `prompt` (from `src/worlds/musicPrompts.json`) is the text used
+     to generate tracks ahead of time. Optional `aiMusic` lists shipped files under
+     `public/worlds/<id>/music/ai/`. Playback uses those files when they are present and
+     otherwise stays on the procedural piece. It does not run a model.
      - `form`: sections share key, groove and the melody motif. `a` sections use the main
        progression, `b` a second one from `progressions`. Layer levels (0–1) scale `density`;
        0 silences a layer. Drums below 0.5 are hats only, below 0.75 a basic kick/snare/hat,
@@ -148,7 +149,30 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      picked by `weight`, skipping events still in `cooldown`. Set `duration` to at least the
      length of the event's sound. Colors are `[r, g, b]` tuples.
 
-5. **Check it.** `npm run dev` prints a single `World config issues` warning if ids collide,
+5. **Generate an AI track, when you want one in the shuffle library.** Playback never
+   downloads a model. Generation is a local Python process (PyTorch + Hugging Face
+   `facebook/musicgen-small`). The first run creates `scripts/generate-music/.venv`, installs
+   the Python packages, and downloads the weights into
+   `scripts/generate-music/.cache/huggingface`. Later runs reuse that cache. An Apple GPU
+   is used when PyTorch can see it; otherwise generation stays on the CPU and just takes
+   longer. Python 3.12 is required (`brew install python@3.12`).
+
+   ```bash
+   npm run generate-music -- orbital-station
+   npm run generate-music -- neon-city --count 3
+   ```
+
+   The command reads that world's prompt, writes the next free file
+   (`orbital-ai-01.wav`, then `orbital-ai-02.wav`, and so on) under
+   `public/worlds/<id>/music/ai/`, and prints the `aiMusic` entry to paste into
+   `src/worlds/worlds.ts`. The number comes from the first word of the world id.
+   It does not overwrite an existing wav. Each file is about 30 seconds, the
+   longest clip MusicGen-small keeps stable.
+
+   Generate track → preview the WAV → add the printed config entry → restart or reload
+   → the track enters that world's shuffle library.
+
+6. **Check it.** `npm run dev` prints a single `World config issues` warning if ids collide,
    delays are inverted, levels are out of range, or asset paths sit outside the world's folder.
    In dev, the browser console exposes `orbitalEvents.list()` and
    `orbitalEvents.trigger("ice-crack")` to fire events on demand, logs each composition
