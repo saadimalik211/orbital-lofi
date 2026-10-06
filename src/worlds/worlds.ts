@@ -44,6 +44,12 @@ export const worlds: World[] = [
       groove: { swing: 0.08, timingHumanization: 0.006, velocityHumanization: 0.06 },
       tape: 0.3,
     },
+    aiMusic: [
+      {
+        id: "orbital-ai-01",
+        src: "/worlds/orbital-station/music/ai/orbital-ai-01.wav",
+      },
+    ],
     ambience: [
       {
         id: "engine",
