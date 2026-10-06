@@ -30,6 +30,27 @@ export type ProgressionId =
   | "1-7-6-7"
   | "1-4-5-1";
 
+/**
+ * One section of the song form. All sections share key, motif and groove; `a` sections share
+ * the main progression, `b` uses a second one. Layer levels (0–1) scale the profile `density`,
+ * 0 silences the layer. For drums the level also sets what plays: below 0.5 hats only, below
+ * 0.75 kick/snare/hats, 0.75+ the full groove, 0.95+ adds pickups and open hats.
+ */
+export type MusicSection = {
+  kind: "intro" | "a" | "b" | "breakdown";
+  /** Ideally a multiple of one progression pass (4 × `barsPerChord`). */
+  bars: number;
+  drums: number;
+  bass: number;
+  melody: number;
+  /** Repeat with seeded changes: alternate chord inversion, motif variant, turnaround. */
+  variation?: boolean;
+  /** Multiplies `space.brightness` (e.g. 0.5 for a filtered intro). Default 1. */
+  tone?: number;
+  /** Multiplies `space.reverb`. Default 1. */
+  wet?: number;
+};
+
 /** Procedural music style. Every composition is `compose(profile, seed)`. All 0–1 values unless noted. */
 export type MusicProfile = {
   /** Inclusive BPM range; each seed picks one. */
@@ -46,13 +67,24 @@ export type MusicProfile = {
     rhythm: "sustain" | "pulse";
     barsPerChord: 1 | 2;
   };
+  /** Peak busyness of each layer; sections scale it down. */
   density: { drums: number; bass: number; melody: number };
   /** pentatonic keeps the melody on the 5 most consonant scale degrees. */
   melodyScale: "full" | "pentatonic";
-  /** Delay of off-beat 16ths, as a fraction of a 16th (0–0.3 is musical). */
-  swing: number;
   /** reverb = wet send; brightness = low-pass openness; softness = slower attacks. */
   space: { reverb: number; brightness: number; softness: number };
+  /** Song form, played in order and then looped. */
+  form: readonly [MusicSection, ...MusicSection[]];
+  groove?: {
+    /** Delay of off-beat 16ths, as a fraction of a 16th (0–0.3). Default 0. */
+    swing?: number;
+    /** Max seeded lateness of off-downbeat notes, in seconds (0–0.03). Default 0.004. */
+    timingHumanization?: number;
+    /** Max seeded gain deviation, as a fraction (0–0.3). Default 0.05. */
+    velocityHumanization?: number;
+  };
+  /** Tape wow/flutter amount on the music bus (0–1; 0.3 ≈ 1.5 cents). Default 0. */
+  tape?: number;
 };
 
 export type AmbienceTrack = {

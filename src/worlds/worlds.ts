@@ -19,8 +19,18 @@ export const worlds: World[] = [
       chords: { style: "ninth", rhythm: "sustain", barsPerChord: 2 },
       density: { drums: 0.22, bass: 0.3, melody: 0.12 },
       melodyScale: "full",
-      swing: 0.08,
       space: { reverb: 0.7, brightness: 0.32, softness: 0.85 },
+      form: [
+        { kind: "intro", bars: 8, drums: 0, bass: 0, melody: 0, tone: 0.75 },
+        { kind: "a", bars: 8, drums: 0, bass: 0.6, melody: 0 },
+        { kind: "a", bars: 8, drums: 0.45, bass: 0.8, melody: 0, variation: true },
+        { kind: "b", bars: 8, drums: 1, bass: 1, melody: 1 },
+        { kind: "a", bars: 8, drums: 0.8, bass: 0.8, melody: 0.6 },
+        { kind: "breakdown", bars: 8, drums: 0, bass: 0, melody: 0, tone: 0.7, wet: 1.4 },
+        { kind: "a", bars: 8, drums: 0.9, bass: 1, melody: 0.8, variation: true },
+      ],
+      groove: { swing: 0.08, timingHumanization: 0.006, velocityHumanization: 0.06 },
+      tape: 0.3,
     },
     ambience: [
       {
@@ -111,8 +121,18 @@ export const worlds: World[] = [
       chords: { style: "seventh", rhythm: "pulse", barsPerChord: 1 },
       density: { drums: 0.58, bass: 0.7, melody: 0.32 },
       melodyScale: "pentatonic",
-      swing: 0.16,
       space: { reverb: 0.3, brightness: 0.48, softness: 0.3 },
+      form: [
+        { kind: "intro", bars: 4, drums: 0, bass: 0, melody: 0, tone: 0.45 },
+        { kind: "a", bars: 8, drums: 0.8, bass: 0.8, melody: 0 },
+        { kind: "a", bars: 8, drums: 0.85, bass: 0.9, melody: 0.6, variation: true },
+        { kind: "b", bars: 8, drums: 1, bass: 1, melody: 1 },
+        { kind: "a", bars: 8, drums: 0.8, bass: 0.8, melody: 0.5 },
+        { kind: "breakdown", bars: 4, drums: 0.35, bass: 0.4, melody: 0, tone: 0.65, wet: 1.3 },
+        { kind: "a", bars: 8, drums: 1, bass: 1, melody: 0.8, variation: true },
+      ],
+      groove: { swing: 0.16, timingHumanization: 0.011, velocityHumanization: 0.1 },
+      tape: 0.55,
     },
     ambience: [
       {

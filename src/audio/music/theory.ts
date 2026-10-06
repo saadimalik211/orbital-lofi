@@ -55,8 +55,13 @@ const VOICING_CENTER = 62;
 /**
  * Picks the inversion/octave of a chord (given as pitch classes, root first) that stays in a
  * mid register and moves least from the previous voicing, so changes never jump octaves.
+ * `avoid` skips one voicing, giving the next-closest inversion (used to vary repeats).
  */
-export function voiceChord(pitchClasses: readonly number[], previous: readonly number[] | null) {
+export function voiceChord(
+  pitchClasses: readonly number[],
+  previous: readonly number[] | null,
+  avoid?: readonly number[],
+) {
   let best: number[] = [];
   let bestScore = Infinity;
   for (let inversion = 0; inversion < pitchClasses.length; inversion += 1) {
@@ -73,6 +78,9 @@ export function voiceChord(pitchClasses: readonly number[], previous: readonly n
         floor = midi + 1;
       }
       if (notes[0] < VOICING_LOW || notes[notes.length - 1] > VOICING_HIGH) {
+        continue;
+      }
+      if (avoid && notes.length === avoid.length && notes.every((note, i) => note === avoid[i])) {
         continue;
       }
       const score = previous

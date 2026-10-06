@@ -26,12 +26,27 @@ function createImpulse(context: BaseAudioContext, seconds: number) {
   return buffer;
 }
 
+/** Gentle tanh curve: rounds off chord peaks, near-linear at normal levels. */
+function createSoftClip(amount: number) {
+  const curve = new Float32Array(1024);
+  for (let i = 0; i < curve.length; i += 1) {
+    const x = (i / (curve.length - 1)) * 2 - 1;
+    curve[i] = Math.tanh(x * amount) / Math.tanh(amount);
+  }
+  return curve;
+}
+
+/** Peak delay-time swing (s) at tape = 1: ≈ 5 cents of wow, ≈ 1.3 cents of flutter. */
+const WOW_DEPTH_S = 0.0009;
+const FLUTTER_DEPTH_S = 0.00002;
+const TAPE_BASE_DELAY_S = 0.012;
+
 /**
- * drums ─────────────┐
- * hats → pan ────────┤
- * bass → low-pass ───┼→ mix → tone low-pass → out → destination
- * keys → low-pass ───┤        ↘ reverb send → convolver ↗
- * lead → low-pass → pan
+ * drums ─────────────────────┐
+ * hats → pan ────────────────┤
+ * bass → low-pass ───────────┼→ mix → tone low-pass ┐
+ * keys → low-pass → soft clip ┤        reverb ───────┼→ tape (wobbling delay) → out → destination
+ * lead → low-pass → pan ──────┘   (sends ↗ reverb)
  */
 export function createMusicEngine(context: AudioContext, destination: AudioNode): MusicEngine {
   const node = <T extends AudioNode>(create: () => T, setup?: (n: T) => void) => {
@@ -60,12 +75,34 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   const leadFilter = lowpass(3200);
   const leadPan = pan(-0.18);
   const drumSend = gain(0.15);
+  const keysDrive = gain(2.2);
+  const keysClip = node(() => context.createWaveShaper(), (w) => {
+    w.curve = createSoftClip(1.4);
+    w.oversample = "2x";
+  });
+  const keysTrim = gain(1 / 2.2);
+
+  // Tape: the whole mix runs through a short delay whose time is wobbled by two slow LFOs.
+  const tape = node(() => context.createDelay(0.05), (d) => (d.delayTime.value = TAPE_BASE_DELAY_S));
+  const wow = node(() => context.createOscillator(), (o) => (o.frequency.value = 0.5));
+  const flutter = node(() => context.createOscillator(), (o) => (o.frequency.value = 6));
+  const wowDepth = gain(0);
+  const flutterDepth = gain(0);
+  wow.connect(wowDepth);
+  flutter.connect(flutterDepth);
+  wowDepth.connect(tape.delayTime);
+  flutterDepth.connect(tape.delayTime);
+  wow.start();
+  flutter.start();
 
   drums.connect(mix);
   hats.connect(drums);
   bassFilter.connect(mix);
-  keysFilter.connect(mix);
-  keysFilter.connect(reverbSend);
+  keysFilter.connect(keysDrive);
+  keysDrive.connect(keysClip);
+  keysClip.connect(keysTrim);
+  keysTrim.connect(mix);
+  keysTrim.connect(reverbSend);
   leadFilter.connect(leadPan);
   leadPan.connect(mix);
   leadPan.connect(reverbSend);
@@ -73,8 +110,9 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   drumSend.connect(reverbSend);
   reverbSend.connect(reverb);
   mix.connect(tone);
-  tone.connect(out);
-  reverb.connect(out);
+  tone.connect(tape);
+  reverb.connect(tape);
+  tape.connect(out);
   out.connect(destination);
 
   const active = new Set<AudioScheduledSourceNode>();
@@ -102,20 +140,41 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   let step = 0;
   let nextTime = 0;
 
+  /** Filter/reverb targets for the composition's base `space`, scaled per section. */
+  let base = { tone: 6000, keys: 2400, wet: 0.3 };
+  const applySection = (brightness: number, wet: number, when: number, glide: number) => {
+    for (const [param, value] of [
+      [tone.frequency, base.tone * brightness],
+      [keysFilter.frequency, base.keys * brightness],
+      [reverbSend.gain, base.wet * wet],
+    ] as const) {
+      if (glide > 0) {
+        param.setTargetAtTime(value, when, glide);
+      } else {
+        param.cancelScheduledValues(when);
+        param.setValueAtTime(value, when);
+      }
+    }
+  };
+
   const index = (c: Composition, sixteenth: number) => {
     const table: ((when: number) => void)[][] = Array.from({ length: c.steps }, () => []);
     const at = (s: number, fn: (when: number) => void) => table[s % c.steps].push(fn);
+    for (const section of c.sections) {
+      // Sections glide in over about a bar rather than switching abruptly.
+      at(section.step, (when) => applySection(section.tone, section.wet, when, sixteenth * 4));
+    }
     for (const hit of c.drums) {
-      at(hit.step, (when) => instruments[hit.kind](when, hit.velocity));
+      at(hit.step, (when) => instruments[hit.kind](when + hit.nudge, hit.velocity));
     }
     for (const n of c.bass) {
-      at(n.step, (when) => instruments.bass(when, n.length * sixteenth, n.midi, n.velocity));
+      at(n.step, (when) => instruments.bass(when + n.nudge, n.length * sixteenth, n.midi, n.velocity));
     }
     for (const chord of c.chords) {
-      at(chord.step, (when) => instruments.keys(when, chord.length * sixteenth, chord.notes, chord.velocity));
+      at(chord.step, (when) => instruments.keys(when + chord.nudge, chord.length * sixteenth, chord));
     }
     for (const n of c.melody) {
-      at(n.step, (when) => instruments.lead(when, n.length * sixteenth, n.midi, n.velocity));
+      at(n.step, (when) => instruments.lead(when + n.nudge, n.length * sixteenth, n.midi, n.velocity));
     }
     return table;
   };
@@ -162,11 +221,15 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       stop();
       const now = context.currentTime;
       const { reverb: wet, brightness, softness } = next.space;
-      reverbSend.gain.setValueAtTime(0.05 + wet * 0.55, now);
-      tone.frequency.setValueAtTime(1800 + brightness * 7000, now);
-      keysFilter.frequency.setValueAtTime(900 + brightness * 3200, now);
+      base = { tone: 1800 + brightness * 7000, keys: 900 + brightness * 3200, wet: 0.05 + wet * 0.55 };
+      const first = next.sections[0];
+      applySection(first?.tone ?? 1, first?.wet ?? 1, now, 0);
       leadFilter.frequency.setValueAtTime(1600 + brightness * 3600, now);
       instruments.setSoftness(softness);
+      wow.frequency.setValueAtTime(next.tape.wowRate, now);
+      flutter.frequency.setValueAtTime(next.tape.flutterRate, now);
+      wowDepth.gain.setValueAtTime(next.tape.depth * WOW_DEPTH_S, now);
+      flutterDepth.gain.setValueAtTime(next.tape.depth * FLUTTER_DEPTH_S, now);
 
       composition = next;
       slots = index(next, 60 / next.bpm / 4);
@@ -180,7 +243,12 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     stop,
     dispose() {
       stop();
-      for (const n of [out, tone, mix, reverb, reverbSend, drums, hats, bassFilter, keysFilter, leadFilter, leadPan, drumSend]) {
+      wow.stop();
+      flutter.stop();
+      for (const n of [
+        out, tone, mix, reverb, reverbSend, drums, hats, bassFilter, keysFilter, leadFilter, leadPan, drumSend,
+        keysDrive, keysClip, keysTrim, tape, wow, flutter, wowDepth, flutterDepth,
+      ]) {
         n.disconnect();
       }
     },

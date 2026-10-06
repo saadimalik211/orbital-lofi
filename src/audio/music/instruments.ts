@@ -11,6 +11,14 @@ export type InstrumentBuses = {
 /** Called for every source so the engine can stop anything still sounding. */
 export type RegisterSource = (source: AudioScheduledSourceNode, ...chain: AudioNode[]) => void;
 
+export type KeysChord = {
+  notes: readonly number[];
+  delays: readonly number[];
+  levels: readonly number[];
+  release: number;
+  velocity: number;
+};
+
 const midiToFreq = (midi: number) => 440 * 2 ** ((midi - 69) / 12);
 
 function createNoise(context: BaseAudioContext) {
@@ -120,7 +128,12 @@ export function createInstruments(
     },
 
     hat(when: number, velocity: number) {
-      noiseHit(buses.hats, when, "highpass", 7200, 0.16 * velocity, 0.018);
+      noiseHit(buses.hats, when, "highpass", 6800 + 900 * velocity, 0.16 * velocity, 0.018);
+    },
+
+    /** Longer, slightly darker hat tail standing in for an open hi-hat. */
+    openHat(when: number, velocity: number) {
+      noiseHit(buses.hats, when, "highpass", 6200, 0.11 * velocity, 0.085);
     },
 
     bass(when: number, duration: number, midi: number, velocity: number) {
@@ -151,29 +164,52 @@ export function createInstruments(
       register(body, bodyGain);
     },
 
-    /** Soft electric-piano-ish chord: detuned triangle + sine per note. */
-    keys(when: number, duration: number, notes: readonly number[], velocity: number) {
-      const gain = context.createGain();
+    /**
+     * Warm electric-keys chord. Per note: a sine body plus a quiet, slowly drifting sawtooth.
+     * A per-chord low-pass opens on the attack and settles, like a struck tine mellowing out.
+     */
+    keys(when: number, duration: number, chord: KeysChord) {
+      const { notes, delays, levels, release, velocity } = chord;
+      const filter = context.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.Q.value = 0.7;
+      filter.frequency.setValueAtTime(2200 + 2600 * velocity * (1 - softness * 0.45), when);
+      filter.frequency.setTargetAtTime(700 + 700 * velocity, when + 0.01, 0.18 + softness * 0.5);
+      filter.connect(buses.keys);
+
       const peak = (0.2 * velocity) / Math.max(1, notes.length);
-      const stopAt = envelope(gain.gain, when, when + duration, peak, {
-        attack: 0.015 + softness * 0.35,
-        decay: 0.6 + softness * 0.8,
-        sustain: 0.55,
-        release: 0.5 + softness * 0.9,
-      });
-      gain.connect(buses.keys);
+      const end = when + duration;
       notes.forEach((midi, i) => {
-        for (const [type, detune] of [["triangle", -4], ["sine", 5]] as const) {
-          const osc = context.createOscillator();
-          osc.type = type;
-          osc.frequency.value = midiToFreq(midi);
-          osc.detune.value = detune + i;
-          osc.connect(gain);
-          osc.start(when);
+        const start = when + (delays[i] ?? 0);
+        const voice = context.createGain();
+        const sawLevel = context.createGain();
+        sawLevel.gain.value = 0.16;
+        // Later voices start later and release a touch longer, so the last one ends last.
+        const stopAt = envelope(voice.gain, start, Math.max(end, start + 0.05), peak * (levels[i] ?? 1), {
+          attack: 0.012 + softness * 0.33,
+          decay: 0.6 + softness * 0.8,
+          sustain: 0.5,
+          release: (0.5 + softness * 0.9) * release * (1 + i * 0.04),
+        });
+        const sine = context.createOscillator();
+        const saw = context.createOscillator();
+        sine.type = "sine";
+        saw.type = "sawtooth";
+        sine.frequency.value = midiToFreq(midi);
+        saw.frequency.value = midiToFreq(midi);
+        sine.detune.value = i - 3;
+        saw.detune.setValueAtTime(7 - i, start);
+        saw.detune.linearRampToValueAtTime(3 - i, stopAt);
+        sine.connect(voice);
+        saw.connect(sawLevel);
+        sawLevel.connect(voice);
+        voice.connect(filter);
+        for (const osc of [sine, saw]) {
+          osc.start(start);
           osc.stop(stopAt + 0.02);
-          // All of a chord's oscillators stop together, so any of them may release the shared gain.
-          register(osc, gain);
         }
+        register(sine, voice);
+        register(saw, ...(i === notes.length - 1 ? [sawLevel, filter] : [sawLevel]));
       });
     },
 

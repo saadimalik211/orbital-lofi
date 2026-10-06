@@ -29,11 +29,31 @@ export function validateWorlds(worlds: readonly World[]) {
     if (music.tempo[0] > music.tempo[1]) {
       problems.push(`${at("music.tempo")} min > max`);
     }
-    for (const [name, value] of Object.entries({ ...music.density, ...music.space, swing: music.swing })) {
+    for (const [name, value] of Object.entries({ ...music.density, ...music.space, tape: music.tape ?? 0 })) {
       if (!inUnitRange(value)) {
         problems.push(`${at(`music.${name}`)} must be 0–1`);
       }
     }
+    const groove = music.groove ?? {};
+    for (const [name, value, max] of [
+      ["swing", groove.swing, 0.3],
+      ["timingHumanization", groove.timingHumanization, 0.03],
+      ["velocityHumanization", groove.velocityHumanization, 0.3],
+    ] as const) {
+      if (value !== undefined && (value < 0 || value > max)) {
+        problems.push(`${at(`music.groove.${name}`)} must be 0–${max}`);
+      }
+    }
+    const pass = 4 * music.chords.barsPerChord;
+    music.form.forEach((section, i) => {
+      const path = at(`music.form[${i}]`);
+      if (section.bars < 1 || section.bars % pass !== 0) {
+        problems.push(`${path} bars should be a multiple of ${pass} (one progression pass)`);
+      }
+      if (![section.drums, section.bass, section.melody].every(inUnitRange)) {
+        problems.push(`${path} layer levels must be 0–1`);
+      }
+    });
 
     const trackIds = new Set<string>();
     for (const track of world.ambience) {
