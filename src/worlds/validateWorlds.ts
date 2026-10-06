@@ -88,6 +88,10 @@ export function validateWorlds(worlds: readonly World[]) {
         problems.push(`${at(`effects.${name}`)} intensity must be 0–1`);
       }
     }
+    const fogColor = world.effects.fog?.color;
+    if (fogColor && !fogColor.every((channel) => channel >= 0 && channel <= 255)) {
+      problems.push(`${at("effects.fog.color")} channels must be 0–255`);
+    }
 
     const eventIds = new Set<string>();
     for (const event of world.events) {

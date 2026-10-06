@@ -218,8 +218,8 @@ body {
 .env-fog {
   inset: -18%;
   background:
-    radial-gradient(ellipse 55% 42% at 18% 78%, rgba(186, 210, 214, 0.16), transparent 68%),
-    radial-gradient(ellipse 48% 38% at 82% 28%, rgba(168, 196, 204, 0.1), transparent 70%);
+    radial-gradient(ellipse 55% 42% at 18% 78%, rgba(var(--env-fog), 0.16), transparent 68%),
+    radial-gradient(ellipse 48% 38% at 82% 28%, rgba(var(--env-fog), 0.1), transparent 70%);
   animation: env-fog-drift 52s ease-in-out infinite alternate;
 }
 

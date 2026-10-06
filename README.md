@@ -99,7 +99,7 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      ambience: [
        { id: "wind", name: "Wind", src: "/worlds/ice-moon/ambience/wind.wav", defaultVolume: 0.3 },
      ],
-     effects: { particles: { type: "snow", intensity: 0.5 }, fog: { intensity: 0.2 } },
+     effects: { particles: { type: "snow", intensity: 0.5 }, fog: { intensity: 0.2, color: [186, 210, 214] } },
      events: [
        { id: "ice-crack", type: "sound", sound: { src: "/worlds/ice-moon/events/crack.wav" },
          weight: 1, minDelay: 60_000, maxDelay: 180_000, cooldown: 120_000, duration: 4_000 },
@@ -133,8 +133,9 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
        Play, and changing worlds, still starts at the intro.
    - **Ambience:** `id` keys the saved mixer level, so a `rain` track in two worlds shares one
      level. Use a distinct id if it should be independent. `defaultVolume` is 0–1.
-   - **Effects:** each entry is optional; `intensity` is 0–1. Available: `rain`, `fog`,
-     `stars`, `particles` (`dust` | `snow` | `atmosphere`), `flicker` (`screen` | `neon`).
+   - **Effects:** each entry is optional; `intensity` is 0–1. Available: `rain`, `fog`
+     (`color` is an `[r, g, b]` haze tint), `stars`, `particles` (`dust` | `snow` | `atmosphere`),
+     `flicker` (`screen` | `neon`).
    - **Events:** `flyby`, `streak`, `pulse` (`beacon` | `glitch` | `flash`) or `sound`.
      Timing is in ms: the next event is scheduled `minDelay`–`maxDelay` after the previous one,
      picked by `weight`, skipping events still in `cooldown`. Set `duration` to at least the
