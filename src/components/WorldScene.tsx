@@ -64,7 +64,6 @@ export function WorldScene() {
         isPlaying={audio.isPlaying}
         status={audio.status}
         nowPlaying={audio.nowPlaying}
-        musicSource={audio.musicSource}
         volume={audio.volume}
         visible={hud.hudVisible}
         idle={hud.idle}

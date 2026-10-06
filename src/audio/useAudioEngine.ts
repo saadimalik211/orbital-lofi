@@ -22,7 +22,7 @@ import {
   subscribeAmbiencePrefs,
   updateAmbiencePrefs,
 } from "@/audio/ambiencePrefs";
-import { createAiMusic, type AiMusic, type AiSourceStatus } from "@/audio/ai/aiMusic";
+import { createAiLibrary, type AiLibrary, type MusicSource } from "@/audio/ai/aiMusic";
 import { compose, describeComposition, type Composition } from "@/audio/music/composer";
 import { describeSilence } from "@/audio/music/silence";
 import { createMusicEngine, type MusicEngine } from "@/audio/music/musicEngine";
@@ -32,7 +32,7 @@ import type { World, WorldId } from "@/worlds/types";
 import { getWorldById } from "@/worlds/worlds";
 
 export type AudioEngineStatus = "idle" | "live" | "error";
-export type { AiSourceStatus };
+export type { MusicSource };
 
 const DEFAULT_VOLUME = 0.55;
 const TRANSITION_FADE_S = 0.55;
@@ -44,8 +44,13 @@ type MusicDevHandle = {
   current: () => string | null;
   /** Score silence for the current piece. Development only. */
   silence: () => string | null;
-  /** Procedural, generating, enhanced, or unavailable. Development only. */
-  ai: () => string;
+  /** Audible music source. Development only. */
+  source: () => MusicSource;
+  /**
+   * Render one MusicGen clip and download a wav. Development only.
+   * Save it under `public/worlds/<id>/music/ai/` and list it on `aiMusic`.
+   */
+  generate: (prompt: string) => Promise<void>;
   next: () => void;
 };
 
@@ -57,7 +62,7 @@ declare global {
 
 /**
  * procedural ─┐
- * ai clip    ─┴→ music (Next fades) ┐
+ * ai file    ─┴→ music (Next fades) ┐
  *        ambience / event sounds    ┴→ master (user volume) → output (transition fade) → speakers
  */
 type AudioGraph = {
@@ -67,12 +72,12 @@ type AudioGraph = {
   music: GainNode;
   ambience: GainNode;
   engine: MusicEngine;
-  ai: AiMusic;
+  ai: AiLibrary;
 };
 
 type Sounding = { worldId: WorldId; composition: Composition };
 
-function createGraph(volume: number, onAiStatus: (status: AiSourceStatus) => void): AudioGraph {
+function createGraph(volume: number): AudioGraph {
   const context = new AudioContext();
   const gain = (value: number) => {
     const node = context.createGain();
@@ -98,17 +103,11 @@ function createGraph(volume: number, onAiStatus: (status: AiSourceStatus) => voi
     music,
     ambience,
     engine: createMusicEngine(context, procedural),
-    ai: createAiMusic(
-      context,
-      procedural,
-      aiBus,
-      (message) => {
-        if (isDev) {
-          console.info(`[orbital-lofi] ${message}`);
-        }
-      },
-      onAiStatus,
-    ),
+    ai: createAiLibrary(context, procedural, aiBus, (message) => {
+      if (isDev) {
+        console.info(`[orbital-lofi] ${message}`);
+      }
+    }),
   };
 }
 
@@ -142,7 +141,6 @@ export function useAudioEngine(initialWorld: World) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolumeState] = useState(DEFAULT_VOLUME);
   const [status, setStatus] = useState<AudioEngineStatus>("idle");
-  const [musicSource, setMusicSource] = useState<AiSourceStatus>("procedural");
   const [nowPlaying, setNowPlaying] = useState<NowPlayingInfo | null>(null);
   const ambiencePrefs = useSyncExternalStore(
     subscribeAmbiencePrefs,
@@ -174,7 +172,7 @@ export function useAudioEngine(initialWorld: World) {
   const eventTokenRef = useRef(0);
 
   const ensureGraph = useCallback(async () => {
-    const graph = (graphRef.current ??= createGraph(volumeRef.current, setMusicSource));
+    const graph = (graphRef.current ??= createGraph(volumeRef.current));
     // Called synchronously inside the click/keypress so autoplay policy allows it.
     const resumed = graph.context.resume().catch(() => {});
     if (graph.context.state !== "running") {
@@ -261,11 +259,7 @@ export function useAudioEngine(initialWorld: World) {
       soundingRef.current = { worldId, composition };
       setNowPlaying(snapshot(worldId, composition));
       fadeTo(graph.music, 1, fadeInSeconds);
-      graph.ai.engage({
-        worldId,
-        seed: composition.seed,
-        prompt: getWorldById(worldId).music.prompt,
-      });
+      graph.ai.engage(getWorldById(worldId));
     },
     [clearNextTimer],
   );
@@ -284,15 +278,22 @@ export function useAudioEngine(initialWorld: World) {
 
   const nextComposition = useCallback(() => {
     const world = worldRef.current;
+    const graph = graphRef.current;
+    // A decoded AI track can take the crossfade immediately. The signal stays.
+    if (
+      graph &&
+      playingRef.current &&
+      soundingRef.current?.worldId === world.id &&
+      !nextTimerRef.current &&
+      graph.ai.advance()
+    ) {
+      return;
+    }
+
     compositionRef.current = composeFor(world, compositionRef.current?.seed);
-    graphRef.current?.ai.retarget({
-      worldId: world.id,
-      seed: compositionRef.current.seed,
-      prompt: world.music.prompt,
-    });
+    graph?.ai.yield();
 
     // Paused, starting, or mid world-transition: only the queued composition changes.
-    const graph = graphRef.current;
     if (!graph || !playingRef.current || soundingRef.current?.worldId !== world.id) {
       // Paused, and not under a world cover: this queue is what Play will start.
       // While a transition is open, the visible world is still the previous one.
@@ -445,11 +446,7 @@ export function useAudioEngine(initialWorld: World) {
       worldRef.current = world;
       // Every world visit gets a fresh composition from that world's profile.
       compositionRef.current = composeFor(world, compositionRef.current?.seed);
-      graphRef.current?.ai.retarget({
-        worldId: world.id,
-        seed: compositionRef.current.seed,
-        prompt: world.music.prompt,
-      });
+      graphRef.current?.ai.retarget(world);
       // A pending Next is abandoned; finishWorldTransition starts the new composition.
       clearNextTimer();
       stopEventSound();
@@ -542,7 +539,21 @@ export function useAudioEngine(initialWorld: World) {
         const composition = soundingRef.current?.composition ?? compositionRef.current;
         return composition ? describeSilence(composition) : null;
       },
-      ai: () => graphRef.current?.ai.status() ?? "procedural",
+      source: () => graphRef.current?.ai.source() ?? "procedural",
+      generate: async (prompt) => {
+        const [{ requestMusicClip }, { downloadWav }] = await Promise.all([
+          import("@/audio/ai/musicgenClient"),
+          import("@/audio/ai/saveWav"),
+        ]);
+        const clip = await requestMusicClip(Date.now(), prompt, (status) => {
+          console.info(`[orbital-lofi] ai ${status}`);
+        });
+        if (!clip) {
+          return;
+        }
+        downloadWav(clip.samples, clip.sampleRate, "ai-track.wav");
+        console.info("[orbital-lofi] saved ai-track.wav");
+      },
       next: nextComposition,
     };
     window.orbitalMusic = handle;
@@ -579,7 +590,6 @@ export function useAudioEngine(initialWorld: World) {
     isPlaying,
     volume,
     status,
-    musicSource,
     nowPlaying,
     ambiencePrefs,
     togglePlayback,

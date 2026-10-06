@@ -1,3 +1,7 @@
+/**
+ * Development-only MusicGen client. Listening never imports this module.
+ * Render a clip from the console, save the wav, and ship it as `aiMusic`.
+ */
 import type { MusicgenOutgoingMessage, MusicgenStatus } from "@/audio/ai/musicgenMessages";
 
 export type GeneratedClip = {

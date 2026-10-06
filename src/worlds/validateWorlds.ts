@@ -74,6 +74,31 @@ export function validateWorlds(worlds: readonly World[]) {
       }
     });
 
+    const aiIds = new Set<string>();
+    for (const track of world.aiMusic ?? []) {
+      const path = `aiMusic.${track.id || "(missing id)"}`;
+      if (!track.id.trim()) {
+        problems.push(`${at("aiMusic")} track id must be non-empty`);
+      } else if (aiIds.has(track.id)) {
+        problems.push(`${at("aiMusic")} duplicate track id "${track.id}"`);
+      }
+      aiIds.add(track.id);
+      checkSrc(path, track.src);
+      if (track.src && !track.src.includes("/music/ai/")) {
+        problems.push(`${at(path)} should live under ${folder}music/ai/`);
+      }
+      const bpm = track.metadata?.bpm;
+      if (bpm !== undefined && (!Number.isFinite(bpm) || bpm < 20 || bpm > 300)) {
+        problems.push(`${at(`${path}.metadata.bpm`)} must be 20–300`);
+      }
+      if (track.metadata?.key !== undefined && !track.metadata.key.trim()) {
+        problems.push(`${at(`${path}.metadata.key`)} must be non-empty when set`);
+      }
+      if (track.metadata?.mode !== undefined && !track.metadata.mode.trim()) {
+        problems.push(`${at(`${path}.metadata.mode`)} must be non-empty when set`);
+      }
+    }
+
     const trackIds = new Set<string>();
     for (const track of world.ambience) {
       if (trackIds.has(track.id)) {

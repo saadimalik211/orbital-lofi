@@ -1,32 +1,35 @@
-import { requestMusicClip, type GeneratedClip } from "@/audio/ai/musicgenClient";
-import type { MusicgenStatus } from "@/audio/ai/musicgenMessages";
+import { loadAudioBuffer } from "@/audio/ambienceEngine";
+import type { AiMusicTrack, World } from "@/worlds/types";
 
 const CROSSFADE_S = 2;
-const TARGET_PEAK = 0.65;
 
-export type AiSession = {
-  worldId: string;
-  seed: number;
-  prompt: string;
-};
+export type MusicSource = "ai" | "procedural";
 
-export type AiSourceStatus = "procedural" | "generating" | "enhanced" | "unavailable";
-
-export type AiMusic = {
-  /** Drop clips from any previous world or seed. Does not cut audio that is still fading out. */
-  retarget: (session: AiSession) => void;
-  /** Procedural playback is up. Resume an AI clip for this session, or keep the procedural underlay. */
-  engage: (session: AiSession) => void;
-  /** Stop speakers. A clip that finishes while paused is kept for this session. */
+export type AiLibrary = {
+  /** Drop the previous world's tracks. Does not cut audio that is still fading out. */
+  retarget: (world: World) => void;
+  /** Playback is up. Start a decoded file immediately, or leave procedural running until one is. */
+  engage: (world: World) => void;
+  /**
+   * Crossfade to another decoded track. False when none is ready, so the caller
+   * can start a new procedural piece without waiting.
+   */
+  advance: () => boolean;
+  /** The next Play should not resume the track that was just skipped. */
+  yield: () => void;
   suspend: () => void;
-  status: () => AiSourceStatus;
+  source: () => MusicSource;
   dispose: () => void;
 };
+
+type Entry = { track: AiMusicTrack; buffer: AudioBuffer };
 
 type Voice = {
   source: AudioBufferSourceNode;
   gain: GainNode;
 };
+
+type LoadBuffer = (context: BaseAudioContext, src: string) => Promise<AudioBuffer>;
 
 function ramp(param: AudioParam, value: number, seconds: number, now: number) {
   param.cancelScheduledValues(now);
@@ -38,77 +41,79 @@ function ramp(param: AudioParam, value: number, seconds: number, now: number) {
   param.linearRampToValueAtTime(value, now + seconds);
 }
 
-function toBuffer(context: AudioContext, clip: GeneratedClip) {
-  let peak = 0;
-  for (let i = 0; i < clip.samples.length; i += 1) {
-    peak = Math.max(peak, Math.abs(clip.samples[i]));
+function shuffle<T>(items: readonly T[]) {
+  const next = items.slice();
+  for (let i = next.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const swap = next[i];
+    next[i] = next[j];
+    next[j] = swap;
   }
-  const scale = peak > 0.001 ? Math.min(1, TARGET_PEAK / peak) : 1;
-  const buffer = context.createBuffer(1, clip.samples.length, clip.sampleRate);
-  const channel = buffer.getChannelData(0);
-  for (let i = 0; i < clip.samples.length; i += 1) {
-    channel[i] = clip.samples[i] * scale;
-  }
-  return buffer;
+  return next;
 }
 
 /**
- * Procedural music keeps running underneath. AI clips crossfade over it and
- * back again. Only the latest session id is allowed to become audible.
+ * Pre-generated world tracks on the AI bus. Procedural music keeps running
+ * underneath. Nothing here loads a model or starts inference.
  */
-export function createAiMusic(
+export function createAiLibrary(
   context: AudioContext,
   procedural: GainNode,
   aiBus: GainNode,
   log: (message: string) => void,
-  onStatus?: (status: AiSourceStatus) => void,
-): AiMusic {
+  load: LoadBuffer = loadAudioBuffer,
+): AiLibrary {
   let epoch = 0;
-  let key = "";
-  let prompt = "";
+  let worldId = "";
+  let tracks: AiMusicTrack[] = [];
+  let bag: AiMusicTrack[] = [];
+  let lastId = "";
+  const failed = new Set<string>();
+  const decoded = new Map<string, AudioBuffer>();
   let engaged = false;
-  let failed = false;
-  let phase: "procedural" | "ai" = "procedural";
-  let clip: AudioBuffer | null = null;
-  let upcoming: AudioBuffer | null = null;
+  let phase: MusicSource = "procedural";
+  let current: Entry | null = null;
+  let upcoming: Entry | null = null;
+  let loading = false;
+  let entrance = false;
   let offset = 0;
   let startedAt: number | null = null;
   let voiceToken = 0;
   let handoffTimer = 0;
-  let requesting = false;
-  let published: AiSourceStatus | null = null;
   const voices: Voice[] = [];
 
-  const sessionKey = (session: AiSession) => `${session.worldId}:${session.seed}`;
-
-  const readStatus = (): AiSourceStatus => {
-    if (failed) {
-      return "unavailable";
-    }
-    if (phase === "ai") {
-      return "enhanced";
-    }
-    if (requesting) {
-      return "generating";
-    }
-    return "procedural";
-  };
-
-  const publish = () => {
-    const next = readStatus();
-    if (next === published) {
-      return;
-    }
-    published = next;
-    onStatus?.(next);
-  };
+  const elapsed = () => (startedAt == null ? offset : offset + (context.currentTime - startedAt));
 
   const clearHandoff = () => {
     window.clearTimeout(handoffTimer);
     handoffTimer = 0;
   };
 
-  const elapsed = () => (startedAt == null ? offset : offset + (context.currentTime - startedAt));
+  const usableTracks = () => tracks.filter((track) => !failed.has(track.src));
+
+  const takeNext = (): AiMusicTrack | null => {
+    const usable = usableTracks();
+    if (usable.length === 0) {
+      return null;
+    }
+    while (bag.length > 0 && failed.has(bag[0].src)) {
+      bag.shift();
+    }
+    if (bag.length === 0) {
+      bag = shuffle(usable);
+      if (bag.length > 1 && bag[0]?.id === lastId) {
+        const first = bag.shift();
+        if (first) {
+          bag.push(first);
+        }
+      }
+    }
+    const track = bag.shift() ?? null;
+    if (track) {
+      lastId = track.id;
+    }
+    return track;
+  };
 
   const stopVoices = () => {
     voiceToken += 1;
@@ -124,6 +129,20 @@ export function createAiMusic(
       voice.source.disconnect();
       voice.gain.disconnect();
     }
+  };
+
+  const fadeOutVoice = (voice: Voice) => {
+    ramp(voice.gain.gain, 0, CROSSFADE_S, context.currentTime);
+    window.setTimeout(() => {
+      voice.source.onended = null;
+      try {
+        voice.source.stop();
+      } catch {
+        // already stopped
+      }
+      voice.source.disconnect();
+      voice.gain.disconnect();
+    }, CROSSFADE_S * 1000 + 40);
   };
 
   const scheduleHandoff = (buffer: AudioBuffer) => {
@@ -157,86 +176,38 @@ export function createAiMusic(
     offset = startAt;
     startedAt = now;
     scheduleHandoff(buffer);
-    return { source, gain };
   };
 
-  const fadeOutVoice = (voice: Voice) => {
-    const now = context.currentTime;
-    ramp(voice.gain.gain, 0, CROSSFADE_S, now);
-    window.setTimeout(() => {
-      voice.source.onended = null;
-      try {
-        voice.source.stop();
-      } catch {
-        // already stopped
-      }
-      voice.source.disconnect();
-      voice.gain.disconnect();
-    }, CROSSFADE_S * 1000 + 40);
-  };
-
-  const requestNext = () => {
-    if (requesting || failed || !prompt) {
-      return;
+  const disarm = () => {
+    clearHandoff();
+    voiceToken += 1;
+    for (const voice of voices) {
+      voice.source.onended = () => {
+        ramp(procedural.gain, 1, 0.5, context.currentTime);
+      };
     }
-    const requestEpoch = epoch;
-    const requestPrompt = prompt;
-    requesting = true;
-    const started = performance.now();
-    log(`ai generation ${requestEpoch} started`);
-    publish();
-    void requestMusicClip(requestEpoch, requestPrompt, (status: MusicgenStatus) => {
-      if (requestEpoch === epoch) {
-        log(`ai ${status}`);
-      }
-    })
-      .then((generated) => {
-        requesting = false;
-        if (requestEpoch !== epoch) {
-          log(`ai generation ${requestEpoch} dropped`);
-          requestNext();
-          publish();
-          return;
-        }
-        if (!generated) {
-          publish();
-          return;
-        }
-        log(`ai generation ${requestEpoch} ready in ${((performance.now() - started) / 1000).toFixed(1)}s`);
-        accept(toBuffer(context, generated));
-        publish();
-      })
-      .catch((error: unknown) => {
-        requesting = false;
-        if (requestEpoch !== epoch) {
-          requestNext();
-          publish();
-          return;
-        }
-        failed = true;
-        const message = error instanceof Error ? error.message : "Music generation failed";
-        log(`ai unavailable: ${message}`);
-        publish();
-      });
   };
 
-  const fadeInClip = (buffer: AudioBuffer, at: number) => {
+  function begin(entry: Entry, fadeSeconds: number) {
     const now = context.currentTime;
     phase = "ai";
-    clip = buffer;
-    ramp(procedural.gain, 0, CROSSFADE_S, now);
-    ramp(aiBus.gain, 1, CROSSFADE_S, now);
-    startVoice(buffer, at, 0.03);
-    if (!upcoming) {
-      requestNext();
+    current = entry;
+    const previous = voices.splice(0);
+    ramp(procedural.gain, 0, fadeSeconds, now);
+    ramp(aiBus.gain, 1, fadeSeconds, now);
+    startVoice(entry.buffer, 0, previous.length > 0 ? CROSSFADE_S : 0.03);
+    for (const voice of previous) {
+      voice.source.onended = null;
+      fadeOutVoice(voice);
     }
-    publish();
-  };
+    log(`ai track ${entry.track.id}`);
+    fillNext();
+  }
 
-  const fadeToProcedural = () => {
+  function fadeToProcedural() {
     const now = context.currentTime;
     phase = "procedural";
-    clip = null;
+    current = null;
     offset = 0;
     startedAt = null;
     ramp(procedural.gain, 1, CROSSFADE_S, now);
@@ -246,11 +217,7 @@ export function createAiMusic(
     }
     voiceToken += 1;
     clearHandoff();
-    if (!failed) {
-      requestNext();
-    }
-    publish();
-  };
+  }
 
   function handoff() {
     if (!engaged || phase !== "ai") {
@@ -261,100 +228,132 @@ export function createAiMusic(
     upcoming = null;
     if (!next) {
       fadeToProcedural();
+      fillNext();
       return;
     }
-    const previous = voices.splice(0);
-    voiceToken += 1;
-    clip = next;
-    startVoice(next, 0, CROSSFADE_S);
-    for (const voice of previous) {
-      fadeOutVoice(voice);
-    }
-    requestNext();
+    begin(next, CROSSFADE_S);
   }
 
-  const accept = (buffer: AudioBuffer) => {
-    if (phase === "ai" && clip) {
-      if (!upcoming) {
-        upcoming = buffer;
-      }
-      return;
+  function deliver(entry: Entry, autostart: boolean) {
+    upcoming = entry;
+    if (autostart && engaged && phase === "procedural") {
+      upcoming = null;
+      begin(entry, entrance ? 0 : CROSSFADE_S);
     }
-    clip = buffer;
-    if (engaged) {
-      fadeInClip(buffer, 0);
-    }
-    publish();
-  };
+  }
 
-  const retarget = (session: AiSession) => {
-    const nextKey = sessionKey(session);
-    if (nextKey === key) {
+  function fillNext(autostart = true) {
+    if (loading || upcoming) {
       return;
     }
+    const track = takeNext();
+    if (!track) {
+      return;
+    }
+    const cached = decoded.get(track.src);
+    if (cached) {
+      deliver({ track, buffer: cached }, autostart);
+      return;
+    }
+    loading = true;
+    const requestEpoch = epoch;
+    void load(context, track.src)
+      .then((buffer) => {
+        if (requestEpoch !== epoch) {
+          return;
+        }
+        loading = false;
+        decoded.set(track.src, buffer);
+        deliver({ track, buffer }, autostart);
+      })
+      .catch(() => {
+        if (requestEpoch !== epoch) {
+          return;
+        }
+        loading = false;
+        failed.add(track.src);
+        log(`ai track failed: ${track.id}`);
+        fillNext(autostart);
+      });
+  }
+
+  const resetQueue = (world: World) => {
     epoch += 1;
-    key = nextKey;
-    prompt = session.prompt;
-    failed = false;
-    engaged = false;
-    phase = "procedural";
-    clip = null;
+    worldId = world.id;
+    tracks = [...(world.aiMusic ?? [])];
+    bag = [];
+    lastId = "";
+    loading = false;
     upcoming = null;
+    current = null;
     offset = 0;
     startedAt = null;
-    clearHandoff();
-    voiceToken += 1;
-    // The outgoing clip is disarmed. If it ends before the next engage, bring the underlay back.
-    for (const voice of voices) {
-      voice.source.onended = () => {
-        ramp(procedural.gain, 1, 0.5, context.currentTime);
-      };
-    }
-    requestNext();
-    publish();
+    phase = "procedural";
+    engaged = false;
+    disarm();
   };
 
   return {
-    retarget,
-    engage(session) {
-      const nextKey = sessionKey(session);
-      const changed = nextKey !== key;
-      if (changed) {
-        retarget(session);
+    retarget(world) {
+      if (world.id === worldId && tracks.length === (world.aiMusic?.length ?? 0)) {
+        return;
+      }
+      resetQueue(world);
+      fillNext();
+    },
+    engage(world) {
+      if (world.id !== worldId) {
+        resetQueue(world);
       }
       engaged = true;
-      if (!changed && phase === "ai" && clip) {
-        if (elapsed() >= clip.duration - 0.3) {
-          if (upcoming) {
-            clip = upcoming;
-            upcoming = null;
-            offset = 0;
-          } else {
-            clip = null;
-          }
-        }
-        if (clip && elapsed() < clip.duration - 0.3) {
-          ramp(procedural.gain, 0, 0, context.currentTime);
-          ramp(aiBus.gain, 1, 0, context.currentTime);
-          startVoice(clip, elapsed(), 0.03);
-          if (!upcoming) {
-            requestNext();
-          }
-          publish();
-          return;
-        }
+      entrance = true;
+      if (phase === "ai" && current && elapsed() < current.buffer.duration - 0.3) {
+        ramp(procedural.gain, 0, 0, context.currentTime);
+        ramp(aiBus.gain, 1, 0, context.currentTime);
+        startVoice(current.buffer, elapsed(), 0.03);
+        fillNext();
+        entrance = false;
+        return;
       }
       stopVoices();
-      offset = 0;
       phase = "procedural";
       ramp(procedural.gain, 1, 0, context.currentTime);
       ramp(aiBus.gain, 0, 0, context.currentTime);
-      if (clip) {
-        fadeInClip(clip, 0);
-      } else if (!requesting && !failed) {
-        requestNext();
+      if (upcoming) {
+        const next = upcoming;
+        upcoming = null;
+        begin(next, 0);
+        entrance = false;
+        return;
       }
-      publish();
+      fillNext();
+      entrance = false;
+    },
+    advance() {
+      if (!engaged) {
+        return false;
+      }
+      if (!upcoming) {
+        fillNext(false);
+      }
+      if (!upcoming) {
+        return false;
+      }
+      const next = upcoming;
+      upcoming = null;
+      begin(next, CROSSFADE_S);
+      return true;
+    },
+    yield() {
+      epoch += 1;
+      engaged = false;
+      phase = "procedural";
+      current = null;
+      upcoming = null;
+      loading = false;
+      offset = 0;
+      startedAt = null;
+      disarm();
     },
     suspend() {
       if (startedAt != null) {
@@ -364,15 +363,14 @@ export function createAiMusic(
       engaged = false;
       stopVoices();
     },
-    status() {
-      return readStatus();
+    source() {
+      return phase;
     },
     dispose() {
       epoch += 1;
       engaged = false;
-      prompt = "";
-      key = "";
-      clip = null;
+      tracks = [];
+      current = null;
       upcoming = null;
       stopVoices();
       aiBus.disconnect();

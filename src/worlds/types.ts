@@ -81,7 +81,7 @@ export type MusicSound = {
 
 /** Procedural music style. Every composition is `compose(profile, seed)`. All 0–1 values unless noted. */
 export type MusicProfile = {
-  /** Text prompt for the optional AI clip. The procedural engine does not read this. */
+  /** Prompt for offline track generation. Playback does not read this. */
   prompt: string;
   /** Inclusive BPM range; each seed picks one. */
   tempo: readonly [number, number];
@@ -122,6 +122,18 @@ export type MusicProfile = {
   };
   /** Tape wow/flutter amount on the music bus (0–1; 0.3 ≈ 1.5 cents). Default 0. */
   tape?: number;
+};
+
+/** A shipped AI recording. Playback loads the file; it never generates one. */
+export type AiMusicTrack = {
+  id: string;
+  src: string;
+  /** Optional label. The HUD keeps the procedural signal unless these are wired up later. */
+  metadata?: {
+    bpm?: number;
+    key?: string;
+    mode?: string;
+  };
 };
 
 export type AmbienceTrack = {
@@ -199,6 +211,8 @@ export type World = {
   year: number;
   scene: SceneConfig;
   music: MusicProfile;
+  /** Pre-generated tracks. Omit it, or leave it empty, and the world stays procedural. */
+  aiMusic?: readonly AiMusicTrack[];
   ambience: AmbienceTrack[];
   effects: WorldEffects;
   events: WorldEvent[];

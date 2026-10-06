@@ -100,6 +100,9 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      ambience: [
        { id: "wind", name: "Wind", src: "/worlds/ice-moon/ambience/wind.wav", defaultVolume: 0.3 },
      ],
+     aiMusic: [
+       { id: "ice-ai-01", src: "/worlds/ice-moon/music/ai/ice-ai-01.wav" },
+     ],
      effects: { particles: { type: "snow", intensity: 0.5 }, fog: { intensity: 0.2, color: [186, 210, 214] } },
      events: [
        { id: "ice-crack", type: "sound", sound: { src: "/worlds/ice-moon/events/crack.wav" },
@@ -115,8 +118,9 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      `density` (0–1) is each layer's peak busyness; `melodyScale: "pentatonic"` restricts the
      melody to five notes; `space` sets filter brightness and attack softness (both 0–1).
      Every world visit and every press of `Next` uses a new seed; the same seed always
-     produces the same notes. `prompt` is only for the optional in-browser AI clip, which
-     crossfades in after Play; the procedural piece never waits on it.
+     produces the same notes. `prompt` is for generating tracks ahead of time. Optional `aiMusic`
+     lists shipped files under `public/worlds/<id>/music/ai/`. Playback uses those files when
+     they are present and otherwise stays on the procedural piece. It does not run a model.
      - `form`: sections share key, groove and the melody motif. `a` sections use the main
        progression, `b` a second one from `progressions`. Layer levels (0–1) scale `density`;
        0 silences a layer. Drums below 0.5 are hats only, below 0.75 a basic kick/snare/hat,

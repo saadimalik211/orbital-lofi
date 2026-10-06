@@ -64,20 +64,6 @@ body {
   }
 }
 
-.now-playing-source-wait {
-  animation: now-playing-source 1.8s ease-in-out infinite;
-}
-
-@keyframes now-playing-source {
-  0%,
-  100% {
-    opacity: 0.45;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
 @keyframes now-playing-in {
   from {
     opacity: 0.4;
@@ -569,7 +555,6 @@ body {
   .hud-shell,
   .now-playing-meta,
   .now-playing-led-live,
-  .now-playing-source-wait,
   .hud-reveal,
   .hud-btn,
   .hud-slider,
