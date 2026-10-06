@@ -49,6 +49,22 @@ export const worlds: World[] = [
         id: "orbital-ai-01",
         src: "/worlds/orbital-station/music/ai/orbital-ai-01.wav",
       },
+      {
+        id: "orbital-ai-02",
+        src: "/worlds/orbital-station/music/ai/orbital-ai-02.wav",
+      },
+      {
+        id: "orbital-ai-03",
+        src: "/worlds/orbital-station/music/ai/orbital-ai-03.wav",
+      },
+      {
+        id: "orbital-ai-04",
+        src: "/worlds/orbital-station/music/ai/orbital-ai-04.wav",
+      },
+      {
+        id: "orbital-ai-05",
+        src: "/worlds/orbital-station/music/ai/orbital-ai-05.wav",
+      },
     ],
     ambience: [
       {
