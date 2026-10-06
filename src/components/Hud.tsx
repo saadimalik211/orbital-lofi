@@ -1,6 +1,7 @@
 import { AmbienceMixer } from "@/components/AmbienceMixer";
 import { WorldSelector } from "@/components/WorldSelector";
 import type { AmbiencePrefs } from "@/audio/ambiencePrefs";
+import { formatTempoKey, signalId, type NowPlayingInfo } from "@/audio/music/nowPlaying";
 import type { AudioEngineStatus } from "@/audio/useAudioEngine";
 import type { World, WorldId } from "@/worlds/types";
 
@@ -10,6 +11,7 @@ type HudProps = {
   selectedWorldId: WorldId;
   isPlaying: boolean;
   status: AudioEngineStatus;
+  nowPlaying: NowPlayingInfo | null;
   volume: number;
   visible: boolean;
   idle: boolean;
@@ -22,6 +24,24 @@ type HudProps = {
   onAmbienceVolumeChange: (trackId: string, volume: number) => void;
   onAmbienceMuteToggle: (trackId: string) => void;
 };
+
+function NowPlaying({ world, info }: { world: World; info: NowPlayingInfo | null }) {
+  const live = info?.worldId === world.id ? info : null;
+  return (
+    <div className="min-w-0" aria-live="polite">
+      <p className="font-mono text-[10px] tracking-[0.32em] text-[#6f8f80] uppercase">{world.name}</p>
+      <div key={live ? `${live.worldId}-${live.seed}` : "standby"} className="now-playing-meta">
+        <p className="mt-1 font-mono text-[11px] tracking-[0.22em] text-[#d7f6e9] uppercase">
+          Procedural Signal
+          {live ? <span className="ml-2 text-[#9dffe0]">{signalId(live.seed)}</span> : null}
+        </p>
+        <p className="mt-0.5 font-mono text-[10px] tracking-[0.16em] text-[#7f9a8e]">
+          {live ? formatTempoKey(live) : "Standby"}
+        </p>
+      </div>
+    </div>
+  );
+}
 
 function statusLabel(status: AudioEngineStatus, isPlaying: boolean) {
   if (status === "error") {
@@ -36,6 +56,7 @@ export function Hud({
   selectedWorldId,
   isPlaying,
   status,
+  nowPlaying,
   volume,
   visible,
   idle,
@@ -85,6 +106,8 @@ export function Hud({
         </header>
 
         <footer className="pointer-events-auto flex max-w-full flex-col gap-4 sm:gap-5">
+          <NowPlaying world={world} info={nowPlaying} />
+
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
             <button
               type="button"

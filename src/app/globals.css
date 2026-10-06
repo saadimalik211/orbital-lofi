@@ -33,6 +33,19 @@ body {
   pointer-events: none;
 }
 
+.now-playing-meta {
+  animation: now-playing-in 400ms ease;
+}
+
+@keyframes now-playing-in {
+  from {
+    opacity: 0.4;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 .hud-reveal {
   opacity: 0.82;
   transition: opacity 420ms ease, color 180ms ease;
@@ -513,6 +526,7 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .hud-shell,
+  .now-playing-meta,
   .hud-reveal,
   .hud-btn,
   .hud-slider,

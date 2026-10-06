@@ -24,6 +24,7 @@ import {
 } from "@/audio/ambiencePrefs";
 import { compose, describeComposition, type Composition } from "@/audio/music/composer";
 import { createMusicEngine, type MusicEngine } from "@/audio/music/musicEngine";
+import { type NowPlayingInfo } from "@/audio/music/nowPlaying";
 import { randomSeed } from "@/audio/music/random";
 import type { World, WorldId } from "@/worlds/types";
 
@@ -94,10 +95,21 @@ function composeFor(world: World, previousSeed?: number) {
   return composition;
 }
 
+function snapshot(worldId: WorldId, composition: Composition): NowPlayingInfo {
+  return {
+    worldId,
+    seed: composition.seed,
+    tempo: composition.bpm,
+    root: composition.key,
+    scale: composition.scale,
+  };
+}
+
 export function useAudioEngine(initialWorld: World) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolumeState] = useState(DEFAULT_VOLUME);
   const [status, setStatus] = useState<AudioEngineStatus>("idle");
+  const [nowPlaying, setNowPlaying] = useState<NowPlayingInfo | null>(null);
   const ambiencePrefs = useSyncExternalStore(
     subscribeAmbiencePrefs,
     getAmbiencePrefs,
@@ -115,6 +127,8 @@ export function useAudioEngine(initialWorld: World) {
   /** What the music engine is actually playing, or null when stopped. */
   const soundingRef = useRef<Sounding | null>(null);
   const nextTimerRef = useRef(0);
+  /** True from a world-cover start until the visible scene swaps. Holds the readout on the old world. */
+  const transitioningRef = useRef(false);
   const playingRef = useRef(false);
   const startingRef = useRef(false);
   const volumeRef = useRef(DEFAULT_VOLUME);
@@ -211,6 +225,7 @@ export function useAudioEngine(initialWorld: World) {
       clearNextTimer();
       graph.engine.play(composition, fromStep);
       soundingRef.current = { worldId, composition };
+      setNowPlaying(snapshot(worldId, composition));
       fadeTo(graph.music, 1, fadeInSeconds);
     },
     [clearNextTimer],
@@ -235,6 +250,11 @@ export function useAudioEngine(initialWorld: World) {
     // Paused, starting, or mid world-transition: only the queued composition changes.
     const graph = graphRef.current;
     if (!graph || !playingRef.current || soundingRef.current?.worldId !== world.id) {
+      // Paused, and not under a world cover: this queue is what Play will start.
+      // While a transition is open, the visible world is still the previous one.
+      if (!playingRef.current && !transitioningRef.current) {
+        setNowPlaying(snapshot(world.id, compositionRef.current));
+      }
       return;
     }
     // A fade-out already in flight plays the latest composition when it lands.
@@ -376,6 +396,7 @@ export function useAudioEngine(initialWorld: World) {
 
   const beginWorldTransition = useCallback(
     (world: World) => {
+      transitioningRef.current = true;
       worldRef.current = world;
       // Every world visit gets a fresh composition from that world's profile.
       compositionRef.current = composeFor(world, compositionRef.current?.seed);
@@ -396,9 +417,13 @@ export function useAudioEngine(initialWorld: World) {
 
   const finishWorldTransition = useCallback(
     (world: World) => {
+      transitioningRef.current = false;
       worldRef.current = world;
       const graph = graphRef.current;
       if (!playingRef.current) {
+        if (compositionRef.current) {
+          setNowPlaying(snapshot(world.id, compositionRef.current));
+        }
         if (graph) {
           fadeTo(graph.output, 1, 0.05);
         }
@@ -498,6 +523,7 @@ export function useAudioEngine(initialWorld: World) {
     isPlaying,
     volume,
     status,
+    nowPlaying,
     ambiencePrefs,
     togglePlayback,
     nextComposition,

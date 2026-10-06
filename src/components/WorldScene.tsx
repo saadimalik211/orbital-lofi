@@ -63,6 +63,7 @@ export function WorldScene() {
         selectedWorldId={transition.targetWorldId}
         isPlaying={audio.isPlaying}
         status={audio.status}
+        nowPlaying={audio.nowPlaying}
         volume={audio.volume}
         visible={hud.hudVisible}
         idle={hud.idle}
