@@ -51,15 +51,18 @@ export type MusicSection = {
   wet?: number;
 };
 
-/** Generated room. The impulse is built in the engine; no sample files. */
+/**
+ * Generated room. Decay, damping, and pre-delay shape the early taps and the tail.
+ * The engine builds both; there is no sample file.
+ */
 export type MusicReverb = {
   /** Wet send, 0–1. Sections scale it with `wet`. */
   amount: number;
-  /** Tail length in seconds (about 0.4–4). */
+  /** Tail length in seconds (about 0.4–4). Also spreads the early taps slightly. */
   decay: number;
-  /** 0 = brighter return, 1 = darker. */
+  /** 0 = brighter return, 1 = darker. Highs fade first. */
   damping: number;
-  /** Silence before the tail, in seconds (0–0.08). */
+  /** Silence before the first reflection, in seconds (0–0.08). */
   preDelay?: number;
 };
 

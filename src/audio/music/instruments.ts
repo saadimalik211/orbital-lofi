@@ -4,6 +4,7 @@ import type { MusicSound } from "@/worlds/types";
 
 export type InstrumentBuses = {
   drums: AudioNode;
+  snare: AudioNode;
   hats: AudioNode;
   bass: AudioNode;
   /** Quiet octave layer. Saturated a little, then joined with the fundamental. */
@@ -181,8 +182,8 @@ export function createInstruments(
     snare(when: number, velocity: number) {
       const bright = sound.snareBrightness;
       const level = Math.min(1.15, Math.max(0, velocity));
-      noiseHit(buses.drums, when, "bandpass", 650 + bright * 1100, 0.24 * level, 0.04 + bright * 0.012, 0.65);
-      noiseHit(buses.drums, when, "lowpass", 420, 0.07 * level, 0.028, 0.5);
+      noiseHit(buses.snare, when, "bandpass", 650 + bright * 1100, 0.24 * level, 0.04 + bright * 0.012, 0.65);
+      noiseHit(buses.snare, when, "lowpass", 420, 0.07 * level, 0.028, 0.5);
       const tone = context.createOscillator();
       const gain = context.createGain();
       tone.type = "sine";
@@ -196,7 +197,7 @@ export function createInstruments(
         release: 0.045,
       });
       tone.connect(gain);
-      gain.connect(buses.drums);
+      gain.connect(buses.snare);
       tone.start(when);
       tone.stop(stopAt + 0.02);
       register(tone, gain);

@@ -34,19 +34,48 @@ function createLoopNoise(context: BaseAudioContext, seconds: number) {
   return buffer;
 }
 
-function createImpulse(context: BaseAudioContext, seconds: number) {
+/**
+ * One stable tail for a decay/damping pair. The start is centered and brighter;
+ * the late tail is wider and darker, with a fast body plus a slower fade.
+ */
+function createImpulse(context: BaseAudioContext, seconds: number, damping: number) {
   const length = Math.max(1, Math.floor(context.sampleRate * seconds));
   const buffer = context.createBuffer(2, length, context.sampleRate);
-  for (let channel = 0; channel < 2; channel += 1) {
-    const data = buffer.getChannelData(channel);
-    let low = 0;
-    for (let i = 0; i < length; i += 1) {
-      low += 0.15 * (Math.random() * 2 - 1 - low);
-      data[i] = low * (1 - i / length) ** 2.4;
-    }
+  const left = buffer.getChannelData(0);
+  const right = buffer.getChannelData(1);
+  const damp = Math.min(1, Math.max(0, damping));
+  const rng = createRng(((Math.round(seconds * 100) << 10) ^ Math.round(damp * 1000) ^ 0x51ed3) >>> 0);
+  const startA = 0.34 - damp * 0.16;
+  const endA = 0.07 + (1 - damp) * 0.08;
+  let shared = 0;
+  let leftN = 0;
+  let rightN = 0;
+  for (let i = 0; i < length; i += 1) {
+    const t = i / context.sampleRate;
+    const a = startA + (endA - startA) * (i / length);
+    shared += a * (rng.next() * 2 - 1 - shared);
+    leftN += a * (rng.next() * 2 - 1 - leftN);
+    rightN += a * (rng.next() * 2 - 1 - rightN);
+    const onset = Math.min(1, t / 0.025);
+    const fast = Math.exp(-t / Math.max(0.04, seconds * 0.08));
+    const slow = Math.exp(-t / Math.max(0.12, seconds / 5.5));
+    const end = Math.min(1, Math.max(0, (seconds - t) / 0.06));
+    const contour = onset * (0.7 * fast + 0.55 * slow) * end;
+    const blend = Math.min(1, t / Math.max(0.25, seconds * 0.45));
+    const common = 1 - blend * 0.72;
+    left[i] = (shared * common + leftN * blend) * contour;
+    right[i] = (shared * common + rightN * blend) * contour;
   }
   return buffer;
 }
+
+/** Quiet early taps, kept inside 10–80 ms so they read as space rather than echoes. */
+const EARLY_TAPS = [
+  { l: 0.013, r: 0.017, g: 0.16 },
+  { l: 0.024, r: 0.029, g: 0.1 },
+  { l: 0.037, r: 0.032, g: 0.06 },
+  { l: 0.054, r: 0.067, g: 0.035 },
+] as const;
 
 /** Gentle tanh curve: rounds off peaks, near-linear at normal levels. */
 function createSoftClip(amount: number) {
@@ -71,7 +100,7 @@ const TAPE_BASE_DELAY_S = 0.012;
  * keys → low-pass → soft clip ──────────┤                       ├→ tape → high-pass → compressor → out
  * lead → low-pass → per-note pan ───────┤   reverb ─────────────┘
  * texture (looping noise) ──────────────┘
- *        reverb: send → pre-delay → convolver → damping
+ *        reverb: send → pre-delay → early taps + darker tail → high-pass
  */
 export function createMusicEngine(context: AudioContext, destination: AudioNode): MusicEngine {
   const node = <T extends AudioNode>(create: () => T, setup?: (n: T) => void) => {
@@ -107,12 +136,43 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   });
   const tone = lowpass(6000);
   const mix = gain(0.7);
-  const preDelay = node(() => context.createDelay(0.1), (d) => (d.delayTime.value = 0));
+  const preDelay = node(() => context.createDelay(0.1), (d) => {
+    d.delayTime.value = 0;
+    d.channelCount = 2;
+    d.channelCountMode = "explicit";
+    d.channelInterpretation = "speakers";
+  });
   const reverb = node(() => context.createConvolver());
   const reverbDamp = lowpass(4000);
   const reverbSend = gain(0.3);
-  const drums = gain(0.62);
-  const hats = gain(1);
+  const earlySplit = node(() => context.createChannelSplitter(2));
+  const earlyMerge = node(() => context.createChannelMerger(2));
+  const earlyLow = lowpass(4200);
+  const earlyGain = gain(0.24);
+  const wetHigh = node(() => context.createBiquadFilter(), (f) => {
+    f.type = "highpass";
+    f.frequency.value = 140;
+    f.Q.value = 0.7;
+  });
+  const earlyTaps = EARLY_TAPS.map((tap) => {
+    const l = node(() => context.createDelay(0.1), (d) => (d.delayTime.value = tap.l));
+    const r = node(() => context.createDelay(0.1), (d) => (d.delayTime.value = tap.r));
+    const gl = gain(tap.g);
+    const gr = gain(tap.g);
+    earlySplit.connect(l, 0);
+    earlySplit.connect(r, 1);
+    l.connect(gl);
+    r.connect(gr);
+    gl.connect(earlyMerge, 0, 0);
+    gr.connect(earlyMerge, 0, 1);
+    return { l, r, gl, gr };
+  });
+  const kickBus = gain(0.62);
+  const snareBus = gain(0.62);
+  const hatBus = gain(0.62);
+  const kickSend = gain(0.04);
+  const snareSend = gain(0.09);
+  const hatSend = gain(0.018);
   const bassFilter = lowpass(520);
   const bassDrive = gain(1.3);
   const bassClip = clip(1.12);
@@ -126,7 +186,6 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   const keysTrim = gain(1 / 1.6);
   const leadFilter = lowpass(3200);
   const leadPan = gain(1);
-  const drumSend = gain(0.12);
 
   const textureBuffer = createLoopNoise(context, 2);
   const textureFilter = node(() => context.createBiquadFilter(), (f) => {
@@ -150,8 +209,15 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   wow.start();
   flutter.start();
 
-  drums.connect(mix);
-  hats.connect(drums);
+  kickBus.connect(mix);
+  snareBus.connect(mix);
+  hatBus.connect(mix);
+  kickBus.connect(kickSend);
+  snareBus.connect(snareSend);
+  hatBus.connect(hatSend);
+  kickSend.connect(reverbSend);
+  snareSend.connect(reverbSend);
+  hatSend.connect(reverbSend);
   bassFilter.connect(bassDrive);
   bassDrive.connect(bassClip);
   bassClip.connect(bassTrim);
@@ -167,12 +233,15 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   leadFilter.connect(leadPan);
   leadPan.connect(mix);
   leadPan.connect(reverbSend);
-  drums.connect(drumSend);
-  drumSend.connect(reverbSend);
   reverbSend.connect(preDelay);
   preDelay.connect(reverb);
+  preDelay.connect(earlySplit);
+  earlyMerge.connect(earlyLow);
+  earlyLow.connect(earlyGain);
+  earlyGain.connect(wetHigh);
   reverb.connect(reverbDamp);
-  reverbDamp.connect(tape);
+  reverbDamp.connect(wetHigh);
+  wetHigh.connect(tape);
   textureFilter.connect(textureGain);
   textureGain.connect(mix);
   mix.connect(tone);
@@ -196,7 +265,15 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
 
   const instruments = createInstruments(
     context,
-    { drums, hats, bass: bassFilter, bassHarmonic: bassHarmonicDrive, keys: keysFilter, lead: leadFilter },
+    {
+      drums: kickBus,
+      snare: snareBus,
+      hats: hatBus,
+      bass: bassFilter,
+      bassHarmonic: bassHarmonicDrive,
+      keys: keysFilter,
+      lead: leadFilter,
+    },
     register,
   );
 
@@ -206,15 +283,17 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   let slots: ((when: number) => void)[][] = [];
   let step = 0;
   let nextTime = 0;
-  let impulseSeconds = -1;
+  let impulseKey = "";
 
-  const ensureImpulse = (seconds: number) => {
+  const ensureImpulse = (seconds: number, damping: number) => {
     const rounded = Math.round(Math.min(4.5, Math.max(0.4, seconds)) * 100) / 100;
-    if (rounded === impulseSeconds) {
+    const damp = Math.min(1, Math.max(0, damping));
+    const key = `${rounded}:${Math.round(damp * 1000)}`;
+    if (key === impulseKey) {
       return;
     }
-    impulseSeconds = rounded;
-    reverb.buffer = createImpulse(context, rounded);
+    impulseKey = key;
+    reverb.buffer = createImpulse(context, rounded, damp);
   };
 
   /** Fades the hiss out and stops its loop. A following start replaces the ramp. */
@@ -344,9 +423,16 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       const { brightness, softness } = next.space;
       const { amount, decay, damping, preDelay: delay = 0 } = next.reverb;
       base = { tone: 1800 + brightness * 7000, keys: 900 + brightness * 3200, wet: 0.05 + amount * 0.55 };
-      ensureImpulse(decay);
+      const damp = Math.min(1, Math.max(0, damping));
+      ensureImpulse(decay, damp);
       preDelay.delayTime.setValueAtTime(Math.min(0.08, Math.max(0, delay)), now);
-      reverbDamp.frequency.setValueAtTime(1400 + (1 - Math.min(1, Math.max(0, damping))) * 5600, now);
+      const room = 0.84 + Math.min(1, decay / 4.5) * 0.38;
+      earlyTaps.forEach((tap, i) => {
+        tap.l.delayTime.setValueAtTime(Math.min(0.08, EARLY_TAPS[i].l * room), now);
+        tap.r.delayTime.setValueAtTime(Math.min(0.08, EARLY_TAPS[i].r * room), now);
+      });
+      earlyLow.frequency.setValueAtTime(2800 + (1 - damp) * 2400, now);
+      reverbDamp.frequency.setValueAtTime(2400 + (1 - damp) * 5000, now);
       const tune = (createRng(next.seed ^ 0x9e3779b9).next() - 0.5) * 12;
       instruments.setSound(next.sound, softness, tune);
       leadFilter.frequency.setValueAtTime(1600 + brightness * 3600, now);
@@ -375,10 +461,13 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       wow.stop();
       flutter.stop();
       for (const n of [
-        out, glue, mud, tone, mix, preDelay, reverb, reverbDamp, reverbSend, drums, hats,
+        out, glue, mud, tone, mix, preDelay, reverb, reverbDamp, reverbSend,
+        earlySplit, earlyMerge, earlyLow, earlyGain, wetHigh,
+        ...earlyTaps.flatMap((tap) => [tap.l, tap.r, tap.gl, tap.gr]),
+        kickBus, snareBus, hatBus, kickSend, snareSend, hatSend,
         bassFilter, bassDrive, bassClip, bassTrim, bassHarmonicDrive, bassHarmonicClip, bassHarmonicTrim,
         keysFilter, keysDrive, keysClip, keysTrim,
-        leadFilter, leadPan, drumSend, textureFilter, textureGain, tape, wow, flutter, wowDepth, flutterDepth,
+        leadFilter, leadPan, textureFilter, textureGain, tape, wow, flutter, wowDepth, flutterDepth,
       ]) {
         n.disconnect();
       }
