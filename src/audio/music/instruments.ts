@@ -68,6 +68,13 @@ export function createInstruments(
   };
   /** Seeded Hz offset for the snare's tonal layer. Same seed, same pitch. */
   let snareTune = 0;
+  /** Flips each hat so consecutive hits are not stacked on one side. Reset per composition. */
+  let hatSide = 1;
+
+  const nextHatPan = () => {
+    hatSide = -hatSide;
+    return hatSide * 0.2;
+  };
 
   const noiseHit = (
     destination: AudioNode,
@@ -77,6 +84,7 @@ export function createInstruments(
     peak: number,
     decay: number,
     q = 0.7,
+    extras?: { lowpass?: number; pan?: number },
   ) => {
     const source = context.createBufferSource();
     const filter = context.createBiquadFilter();
@@ -93,11 +101,30 @@ export function createInstruments(
     });
     source.connect(filter);
     filter.connect(gain);
-    gain.connect(destination);
+    const chain: AudioNode[] = [filter, gain];
+    let output: AudioNode = gain;
+    if (extras?.lowpass) {
+      const low = context.createBiquadFilter();
+      low.type = "lowpass";
+      low.frequency.value = extras.lowpass;
+      low.Q.value = 0.5;
+      gain.connect(low);
+      output = low;
+      chain.push(low);
+    }
+    if (extras?.pan !== undefined) {
+      const panner = context.createStereoPanner();
+      panner.pan.value = extras.pan;
+      output.connect(panner);
+      panner.connect(destination);
+      chain.push(panner);
+    } else {
+      output.connect(destination);
+    }
     noiseCursor = (noiseCursor + 0.037) % 0.5;
     source.start(when, noiseCursor);
     source.stop(stopAt + 0.02);
-    register(source, filter, gain);
+    register(source, ...chain);
   };
 
   return {
@@ -112,6 +139,7 @@ export function createInstruments(
       };
       softness = clamp01(nextSoftness);
       snareTune = tune;
+      hatSide = 1;
     },
 
     /**
@@ -145,7 +173,7 @@ export function createInstruments(
       }
     },
 
-    /** Soft lofi snare: a dark noise body, a quieter low thump, and a short sine tone. */
+    /** Soft lofi snare: a dark noise body, a quieter low thump, and a sine that falls. */
     snare(when: number, velocity: number) {
       const bright = sound.snareBrightness;
       const level = Math.min(1.15, Math.max(0, velocity));
@@ -154,7 +182,9 @@ export function createInstruments(
       const tone = context.createOscillator();
       const gain = context.createGain();
       tone.type = "sine";
-      tone.frequency.value = 168 + bright * 28 + snareTune;
+      const startHz = (188 + bright * 36 + snareTune) * (0.96 + 0.08 * Math.min(1, level));
+      tone.frequency.setValueAtTime(startHz, when);
+      tone.frequency.exponentialRampToValueAtTime(Math.max(70, startHz * 0.74), when + 0.05);
       const stopAt = envelope(gain.gain, when, when + 0.008, 0.09 * level, {
         attack: 0.002,
         decay: 0.022,
@@ -170,29 +200,23 @@ export function createInstruments(
 
     hat(when: number, velocity: number) {
       const bright = sound.hatBrightness;
-      noiseHit(
-        buses.hats,
-        when,
-        "bandpass",
-        4000 + bright * 2600,
-        0.1 * velocity,
-        0.011 + (1 - bright) * 0.006,
-        0.55,
-      );
+      const level = Math.min(1.15, Math.max(0, velocity));
+      const center = (2600 + bright * 1400) * (0.92 + 0.16 * level);
+      noiseHit(buses.hats, when, "bandpass", center, 0.15 * level, (0.02 + (1 - bright) * 0.012) * (0.88 + 0.24 * level), 1.7, {
+        lowpass: 5200 + bright * 1400,
+        pan: nextHatPan(),
+      });
     },
 
-    /** Same noise as the closed hat, held a little longer and tuned slightly lower. */
+    /** Same noise as the closed hat, held longer, tuned lower, and a little wider. */
     openHat(when: number, velocity: number) {
       const bright = sound.hatBrightness;
-      noiseHit(
-        buses.hats,
-        when,
-        "bandpass",
-        3400 + bright * 2000,
-        0.08 * velocity,
-        0.05 + bright * 0.02,
-        0.45,
-      );
+      const level = Math.min(1.15, Math.max(0, velocity));
+      const center = (2100 + bright * 1100) * (0.94 + 0.12 * level);
+      noiseHit(buses.hats, when, "bandpass", center, 0.11 * level, (0.055 + bright * 0.02) * (0.9 + 0.2 * level), 1.15, {
+        lowpass: 4600 + bright * 1200,
+        pan: nextHatPan(),
+      });
     },
 
     bass(when: number, duration: number, midi: number, velocity: number) {
@@ -226,9 +250,10 @@ export function createInstruments(
     },
 
     /**
-     * Mellow electric keys. Each note is a sine plus a quiet detuned triangle;
-     * cooler profiles add a faint octave harmonic. One low-pass per chord opens
-     * on the attack and settles, and a tiny noise tick sells the strike.
+     * Mellow electric keys. The body is a sine plus a quiet detuned triangle that
+     * follows the slow envelope. A short octave and third-harmonic strike fades first, so
+     * the attack has a soft hammer and the sustain stays dark. Warmer profiles
+     * quiet that strike. Notes of a chord sit a little apart in the stereo field.
      */
     keys(when: number, duration: number, chord: KeysChord) {
       const { notes, delays, levels, release, velocity } = chord;
@@ -263,13 +288,16 @@ export function createInstruments(
 
       const peak = (0.16 * level) / Math.max(1, notes.length);
       const end = when + duration;
-      const harmonic = warmth < 0.72;
+      const strikeAmount = 0.4 + (1 - warmth) * 0.22;
       notes.forEach((midi, i) => {
         const start = when + (delays[i] ?? 0);
         const voice = context.createGain();
         const partial = context.createGain();
+        const panner = context.createStereoPanner();
         partial.gain.value = 0.2 * (1 - warmth * 0.4);
-        const stopAt = envelope(voice.gain, start, Math.max(end, start + 0.05), peak * (levels[i] ?? 1), {
+        panner.pan.value = notes.length <= 1 ? 0 : ((i + 0.5) / notes.length - 0.5) * 0.32;
+        const noteLevel = peak * (levels[i] ?? 1);
+        const stopAt = envelope(voice.gain, start, Math.max(end, start + 0.05), noteLevel, {
           attack: 0.01 + softness * 0.3,
           decay: 0.55 + softness * 0.7,
           sustain: 0.48,
@@ -287,29 +315,45 @@ export function createInstruments(
         sine.connect(voice);
         triangle.connect(partial);
         partial.connect(voice);
-        voice.connect(filter);
-        const oscs = [sine, triangle];
-        let octaveGain: GainNode | null = null;
-        if (harmonic) {
-          const octave = context.createOscillator();
-          octaveGain = context.createGain();
-          octave.type = "sine";
-          octave.frequency.value = freq * 2;
-          octaveGain.gain.value = 0.06 * (1 - warmth);
-          octave.connect(octaveGain);
-          octaveGain.connect(voice);
-          oscs.push(octave);
-        }
-        for (const osc of oscs) {
-          osc.start(start);
-          osc.stop(stopAt + 0.02);
-        }
+        voice.connect(panner);
+
+        const strike = context.createGain();
+        const strikeStop = envelope(strike.gain, start, start + 0.08, noteLevel * strikeAmount, {
+          attack: 0.005,
+          decay: 0.045,
+          sustain: 0.2,
+          release: 0.07,
+        });
+        const octave = context.createOscillator();
+        const third = context.createOscillator();
+        const thirdGain = context.createGain();
+        const stretch = Math.min(6, Math.max(0, (midi - 57) * 0.1));
+        octave.type = "sine";
+        third.type = "sine";
+        thirdGain.gain.value = 0.2;
+        octave.frequency.value = freq * 2;
+        third.frequency.value = freq * 3;
+        octave.detune.value = 4 + stretch;
+        third.detune.value = 7 + stretch;
+        octave.connect(strike);
+        third.connect(thirdGain);
+        thirdGain.connect(strike);
+        strike.connect(panner);
+        panner.connect(filter);
+
+        sine.start(start);
+        triangle.start(start);
+        octave.start(start);
+        third.start(start);
+        sine.stop(stopAt + 0.02);
+        triangle.stop(stopAt + 0.02);
+        octave.stop(strikeStop + 0.02);
+        third.stop(strikeStop + 0.02);
         const last = i === notes.length - 1;
-        register(sine, ...(last ? [voice, filter] : [voice]));
+        register(sine, voice, panner, ...(last ? [filter] : []));
         register(triangle, partial);
-        if (oscs[2] && octaveGain) {
-          register(oscs[2], octaveGain);
-        }
+        register(octave, strike);
+        register(third, thirdGain);
       });
     },
 

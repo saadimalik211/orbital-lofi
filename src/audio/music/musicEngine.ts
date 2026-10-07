@@ -65,7 +65,7 @@ const TAPE_BASE_DELAY_S = 0.012;
 
 /**
  * drums ─────────────────────────┐
- * hats → pan ────────────────────┤
+ * hats → per-hit pan ───────────┤
  * bass → low-pass → soft clip ───┼→ mix → tone ┐
  * keys → low-pass → soft clip ───┤             ├→ tape → high-pass → compressor → out
  * lead → low-pass → pan ─────────┤   reverb ───┘
@@ -112,7 +112,7 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   const reverbDamp = lowpass(4000);
   const reverbSend = gain(0.3);
   const drums = gain(0.62);
-  const hats = pan(0.22);
+  const hats = gain(1);
   const bassFilter = lowpass(520);
   const bassDrive = gain(1.3);
   const bassClip = clip(1.12);
