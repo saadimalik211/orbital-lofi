@@ -360,8 +360,14 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       // Sections glide in over about a bar rather than switching abruptly.
       at(section.step, (when) => applySection(section.tone, section.wet, when, sixteenth * 4));
     }
+    const kickTone = createRng(c.seed ^ 0x85ebca6b);
     for (const hit of c.drums) {
-      at(hit.step, (when) => instruments[hit.kind](when + hit.nudge, hit.velocity));
+      if (hit.kind === "kick") {
+        const color = kickTone.next();
+        at(hit.step, (when) => instruments.kick(when + hit.nudge, hit.velocity, color));
+      } else {
+        at(hit.step, (when) => instruments[hit.kind](when + hit.nudge, hit.velocity));
+      }
     }
     const tone = createRng(c.seed ^ 0xb5297a4d);
     for (const n of c.bass) {

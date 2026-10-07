@@ -148,21 +148,26 @@ export function createInstruments(
     },
 
     /**
-     * Warm kick: a sine that falls quickly onto a low note, plus a very short
-     * band-passed click. Softer profiles almost drop the click and keep the tail short.
+     * Warm kick: a sine that falls onto a low note, plus a very short band-passed click.
+     * `color` is a seeded 0–1 offset so repeated hits are not copies. Softness still
+     * decides how round the body is and how quiet the click stays.
      */
-    kick(when: number, velocity: number) {
+    kick(when: number, velocity: number, color = 0.5) {
       const soft = sound.kickSoftness;
       const level = Math.min(1.15, Math.max(0, velocity));
+      const vel = Math.min(1, level);
+      const shade = Math.min(1, Math.max(0, color));
       const body = context.createOscillator();
       const gain = context.createGain();
       body.type = "sine";
-      const startHz = 72 + (1 - soft) * 48;
+      const endHz = Math.max(36, 44 + (1 - soft) * 8 + (shade - 0.5) * 1.2);
+      const startHz = Math.max(endHz * 1.2, 72 + (1 - soft) * 48 + (shade - 0.5) * 8 + (vel - 0.75) * 3);
+      const drop = (0.07 + soft * 0.04) * (1.05 - vel * 0.1);
       body.frequency.setValueAtTime(startHz, when);
-      body.frequency.exponentialRampToValueAtTime(44 + (1 - soft) * 8, when + 0.07 + soft * 0.04);
-      const stopAt = envelope(gain.gain, when, when + 0.016, 0.46 * level * (0.85 + 0.15 * (1 - soft)), {
+      body.frequency.exponentialRampToValueAtTime(endHz, when + drop);
+      const stopAt = envelope(gain.gain, when, when + 0.016, 0.46 * level * (0.85 + 0.15 * (1 - soft)) * (0.97 + shade * 0.06), {
         attack: 0.003,
-        decay: 0.06 + soft * 0.03,
+        decay: (0.06 + soft * 0.03) * (0.92 + shade * 0.16),
         sustain: 0,
         release: 0.14 + soft * 0.06,
       });
@@ -172,9 +177,17 @@ export function createInstruments(
       body.stop(stopAt + 0.02);
       register(body, gain);
 
-      const click = 0.12 * level * (1 - soft * 0.88);
+      const click = 0.12 * level * (1 - soft * 0.88) * (0.88 + shade * 0.24) * (0.92 + vel * 0.12);
       if (click > 0.012) {
-        noiseHit(buses.drums, when, "bandpass", 1400 + (1 - soft) * 900, click, 0.007 + (1 - soft) * 0.005, 0.6);
+        noiseHit(
+          buses.drums,
+          when,
+          "bandpass",
+          (1400 + (1 - soft) * 900) * (0.94 + shade * 0.12),
+          click,
+          (0.007 + (1 - soft) * 0.005) * (0.9 + shade * 0.2),
+          0.6,
+        );
       }
     },
 
