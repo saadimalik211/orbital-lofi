@@ -1,5 +1,6 @@
 /** Synthesized voices. Every note starts and ends at zero gain so nothing clicks. */
 
+import { createRng } from "@/audio/music/random";
 import type { MusicSound } from "@/worlds/types";
 
 export type InstrumentBuses = {
@@ -27,13 +28,20 @@ export type KeysChord = {
 const midiToFreq = (midi: number) => 440 * 2 ** ((midi - 69) / 12);
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 
-function createNoise(context: BaseAudioContext) {
+function createNoise(context: BaseAudioContext, seed?: number) {
   const buffer = context.createBuffer(1, context.sampleRate, context.sampleRate);
   const data = buffer.getChannelData(0);
+  const rng = seed === undefined ? null : createRng(seed >>> 0);
   for (let i = 0; i < data.length; i += 1) {
-    data[i] = Math.random() * 2 - 1;
+    data[i] = (rng ? rng.next() : Math.random()) * 2 - 1;
   }
   return buffer;
+}
+
+/** Spread a 0–1 shade across the buffer, leaving room for the hit to finish. */
+function noiseOffset(buffer: AudioBuffer, shade: number) {
+  const span = Math.max(0, buffer.duration - 0.15);
+  return Math.min(1, Math.max(0, shade)) * span;
 }
 
 /** Attack to `peak`, decay toward `peak * sustain`, release from `end`. Returns the stop time. */
@@ -58,6 +66,9 @@ export function createInstruments(
   register: RegisterSource,
 ) {
   const noise = createNoise(context);
+  let snareNoise = createNoise(context, 0x51a3c2e1);
+  let hatNoise = createNoise(context, 0x9e3779b1);
+  let noiseSeed = -1;
   let noiseCursor = 0;
   /** 0 = snappy, 1 = slow soft attacks. Set per composition. */
   let softness = 0.5;
@@ -72,13 +83,6 @@ export function createInstruments(
   };
   /** Seeded Hz offset for the snare's tonal layer. Same seed, same pitch. */
   let snareTune = 0;
-  /** Flips each hat so consecutive hits are not stacked on one side. Reset per composition. */
-  let hatSide = 1;
-
-  const nextHatPan = () => {
-    hatSide = -hatSide;
-    return hatSide * 0.2;
-  };
 
   const noiseHit = (
     destination: AudioNode,
@@ -88,12 +92,13 @@ export function createInstruments(
     peak: number,
     decay: number,
     q = 0.7,
-    extras?: { lowpass?: number; pan?: number },
+    extras?: { lowpass?: number; pan?: number; buffer?: AudioBuffer; offset?: number },
   ) => {
     const source = context.createBufferSource();
     const filter = context.createBiquadFilter();
     const gain = context.createGain();
-    source.buffer = noise;
+    const seeded = extras?.buffer !== undefined && extras.offset !== undefined;
+    source.buffer = extras?.buffer ?? noise;
     filter.type = filterType;
     filter.frequency.value = frequency;
     filter.Q.value = q;
@@ -125,14 +130,18 @@ export function createInstruments(
     } else {
       output.connect(destination);
     }
-    noiseCursor = (noiseCursor + 0.037) % 0.5;
-    source.start(when, noiseCursor);
+    let offset = extras?.offset ?? 0;
+    if (!seeded) {
+      noiseCursor = (noiseCursor + 0.037) % 0.5;
+      offset = noiseCursor;
+    }
+    source.start(when, offset);
     source.stop(stopAt + 0.02);
     register(source, ...chain);
   };
 
   return {
-    setSound(next: MusicSound, nextSoftness: number, tune: number) {
+    setSound(next: MusicSound, nextSoftness: number, tune: number, seed = 1) {
       sound = {
         kickSoftness: clamp01(next.kickSoftness),
         snareBrightness: clamp01(next.snareBrightness),
@@ -144,7 +153,11 @@ export function createInstruments(
       };
       softness = clamp01(nextSoftness);
       snareTune = tune;
-      hatSide = 1;
+      if (seed !== noiseSeed) {
+        noiseSeed = seed;
+        snareNoise = createNoise(context, seed ^ 0x51a3c2e1);
+        hatNoise = createNoise(context, seed ^ 0x9e3779b1);
+      }
     },
 
     /**
@@ -191,12 +204,36 @@ export function createInstruments(
       }
     },
 
-    /** Soft lofi snare: a dark noise body, a quieter low thump, and a sine that falls. */
-    snare(when: number, velocity: number) {
+    /**
+     * Soft lofi snare: filtered noise, a quieter thump, and a sine that falls.
+     * `color` picks a seeded noise slice and a few percent of filter and decay.
+     */
+    snare(when: number, velocity: number, color = 0.5) {
       const bright = sound.snareBrightness;
       const level = Math.min(1.15, Math.max(0, velocity));
-      noiseHit(buses.snare, when, "bandpass", 650 + bright * 1100, 0.24 * level, 0.04 + bright * 0.012, 0.65);
-      noiseHit(buses.snare, when, "lowpass", 420, 0.07 * level, 0.028, 0.5);
+      const vel = Math.min(1, level);
+      const shade = Math.min(1, Math.max(0, color));
+      const air = 0.97 + vel * 0.06;
+      noiseHit(
+        buses.snare,
+        when,
+        "bandpass",
+        (650 + bright * 1100) * (0.96 + shade * 0.08) * air,
+        0.24 * level * (0.94 + shade * 0.12),
+        (0.04 + bright * 0.012) * (0.92 + shade * 0.16),
+        0.65 * (0.92 + shade * 0.16),
+        { buffer: snareNoise, offset: noiseOffset(snareNoise, shade) },
+      );
+      noiseHit(
+        buses.snare,
+        when,
+        "lowpass",
+        420 * (0.97 + shade * 0.06),
+        0.07 * level * (0.95 + shade * 0.1),
+        0.028 * (0.94 + shade * 0.12),
+        0.5,
+        { buffer: snareNoise, offset: noiseOffset(snareNoise, (shade * 0.73 + 0.31) % 1) },
+      );
       const tone = context.createOscillator();
       const gain = context.createGain();
       tone.type = "sine";
@@ -216,24 +253,32 @@ export function createInstruments(
       register(tone, gain);
     },
 
-    hat(when: number, velocity: number) {
+    hat(when: number, velocity: number, color = 0.5) {
       const bright = sound.hatBrightness;
       const level = Math.min(1.15, Math.max(0, velocity));
-      const center = (2600 + bright * 1400) * (0.92 + 0.16 * level);
-      noiseHit(buses.hats, when, "bandpass", center, 0.15 * level, (0.02 + (1 - bright) * 0.012) * (0.88 + 0.24 * level), 1.7, {
-        lowpass: 5200 + bright * 1400,
-        pan: nextHatPan(),
+      const vel = Math.min(1, level);
+      const shade = Math.min(1, Math.max(0, color));
+      const center = (2600 + bright * 1400) * (0.92 + 0.16 * vel) * (0.96 + shade * 0.08);
+      noiseHit(buses.hats, when, "bandpass", center, 0.15 * level, (0.02 + (1 - bright) * 0.012) * (0.88 + 0.24 * vel) * (0.92 + shade * 0.16), 1.7 * (0.94 + shade * 0.12), {
+        lowpass: (5200 + bright * 1400) * (0.95 + shade * 0.08),
+        pan: (shade - 0.5) * 0.4,
+        buffer: hatNoise,
+        offset: noiseOffset(hatNoise, shade),
       });
     },
 
     /** Same noise as the closed hat, held longer, tuned lower, and a little wider. */
-    openHat(when: number, velocity: number) {
+    openHat(when: number, velocity: number, color = 0.5) {
       const bright = sound.hatBrightness;
       const level = Math.min(1.15, Math.max(0, velocity));
-      const center = (2100 + bright * 1100) * (0.94 + 0.12 * level);
-      noiseHit(buses.hats, when, "bandpass", center, 0.11 * level, (0.055 + bright * 0.02) * (0.9 + 0.2 * level), 1.15, {
-        lowpass: 4600 + bright * 1200,
-        pan: nextHatPan(),
+      const vel = Math.min(1, level);
+      const shade = Math.min(1, Math.max(0, color));
+      const center = (2100 + bright * 1100) * (0.94 + 0.12 * vel) * (0.96 + shade * 0.08);
+      noiseHit(buses.hats, when, "bandpass", center, 0.11 * level, (0.055 + bright * 0.02) * (0.9 + 0.2 * vel) * (0.92 + shade * 0.16), 1.15 * (0.94 + shade * 0.12), {
+        lowpass: (4600 + bright * 1200) * (0.95 + shade * 0.08),
+        pan: (shade - 0.5) * 0.36,
+        buffer: hatNoise,
+        offset: noiseOffset(hatNoise, (shade * 0.61 + 0.17) % 1),
       });
     },
 

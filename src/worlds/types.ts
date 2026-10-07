@@ -80,7 +80,7 @@ export type MusicSound = {
   leadBrightness: number;
   /** Octave harmonic on the bass, for speakers that miss the fundamental. 0 is almost none. */
   bassPresence: number;
-  /** Vinyl-style noise under the music. Even 1 stays very quiet. */
+  /** Very quiet noise bed under the music. Even 1 stays in the background. */
   textureAmount: number;
 };
 
