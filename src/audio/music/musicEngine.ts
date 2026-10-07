@@ -64,12 +64,13 @@ const FLUTTER_DEPTH_S = 0.00002;
 const TAPE_BASE_DELAY_S = 0.012;
 
 /**
- * drums ─────────────────────────┐
- * hats → per-hit pan ───────────┤
- * bass → low-pass → soft clip ───┼→ mix → tone ┐
- * keys → low-pass → soft clip ───┤             ├→ tape → high-pass → compressor → out
- * lead → low-pass → pan ─────────┤   reverb ───┘
- * texture (looping noise) ───────┘
+ * drums ────────────────────────────────┐
+ * hats → per-hit pan ───────────────────┤
+ * bass sine ────────────────────────────┐
+ * bass octave → light clip ─────────────┴→ low-pass → soft clip ┤
+ * keys → low-pass → soft clip ──────────┤                       ├→ tape → high-pass → compressor → out
+ * lead → low-pass → per-note pan ───────┤   reverb ─────────────┘
+ * texture (looping noise) ──────────────┘
  *        reverb: send → pre-delay → convolver → damping
  */
 export function createMusicEngine(context: AudioContext, destination: AudioNode): MusicEngine {
@@ -85,7 +86,6 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       f.frequency.value = frequency;
       f.Q.value = 0.5;
     });
-  const pan = (value: number) => node(() => context.createStereoPanner(), (p) => (p.pan.value = value));
   const clip = (amount: number) =>
     node(() => context.createWaveShaper(), (w) => {
       w.curve = createSoftClip(amount);
@@ -117,12 +117,15 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   const bassDrive = gain(1.3);
   const bassClip = clip(1.12);
   const bassTrim = gain(1 / 1.3);
+  const bassHarmonicDrive = gain(1.75);
+  const bassHarmonicClip = clip(1.5);
+  const bassHarmonicTrim = gain(1 / 1.75);
   const keysFilter = lowpass(2400);
   const keysDrive = gain(1.6);
   const keysClip = clip(1.25);
   const keysTrim = gain(1 / 1.6);
   const leadFilter = lowpass(3200);
-  const leadPan = pan(-0.18);
+  const leadPan = gain(1);
   const drumSend = gain(0.12);
 
   const textureBuffer = createLoopNoise(context, 2);
@@ -153,6 +156,9 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   bassDrive.connect(bassClip);
   bassClip.connect(bassTrim);
   bassTrim.connect(mix);
+  bassHarmonicDrive.connect(bassHarmonicClip);
+  bassHarmonicClip.connect(bassHarmonicTrim);
+  bassHarmonicTrim.connect(bassFilter);
   keysFilter.connect(keysDrive);
   keysDrive.connect(keysClip);
   keysClip.connect(keysTrim);
@@ -190,7 +196,7 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
 
   const instruments = createInstruments(
     context,
-    { drums, hats, bass: bassFilter, keys: keysFilter, lead: leadFilter },
+    { drums, hats, bass: bassFilter, bassHarmonic: bassHarmonicDrive, keys: keysFilter, lead: leadFilter },
     register,
   );
 
@@ -278,14 +284,17 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     for (const hit of c.drums) {
       at(hit.step, (when) => instruments[hit.kind](when + hit.nudge, hit.velocity));
     }
+    const tone = createRng(c.seed ^ 0xb5297a4d);
     for (const n of c.bass) {
-      at(n.step, (when) => instruments.bass(when + n.nudge, n.length * sixteenth, n.midi, n.velocity));
+      const color = tone.next();
+      at(n.step, (when) => instruments.bass(when + n.nudge, n.length * sixteenth, n.midi, n.velocity, color));
     }
     for (const chord of c.chords) {
       at(chord.step, (when) => instruments.keys(when + chord.nudge, chord.length * sixteenth, chord));
     }
     for (const n of c.melody) {
-      at(n.step, (when) => instruments.lead(when + n.nudge, n.length * sixteenth, n.midi, n.velocity));
+      const color = tone.next();
+      at(n.step, (when) => instruments.lead(when + n.nudge, n.length * sixteenth, n.midi, n.velocity, color));
     }
     return table;
   };
@@ -367,7 +376,8 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       flutter.stop();
       for (const n of [
         out, glue, mud, tone, mix, preDelay, reverb, reverbDamp, reverbSend, drums, hats,
-        bassFilter, bassDrive, bassClip, bassTrim, keysFilter, keysDrive, keysClip, keysTrim,
+        bassFilter, bassDrive, bassClip, bassTrim, bassHarmonicDrive, bassHarmonicClip, bassHarmonicTrim,
+        keysFilter, keysDrive, keysClip, keysTrim,
         leadFilter, leadPan, drumSend, textureFilter, textureGain, tape, wow, flutter, wowDepth, flutterDepth,
       ]) {
         n.disconnect();

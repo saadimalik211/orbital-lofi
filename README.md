@@ -84,7 +84,7 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
        reverb: { amount: 0.8, decay: 3.2, damping: 0.7, preDelay: 0.02 },
        sound: {
          kickSoftness: 0.8, snareBrightness: 0.3, hatBrightness: 0.3,
-         chordWarmth: 0.8, leadBrightness: 0.35, textureAmount: 0.05,
+         chordWarmth: 0.8, leadBrightness: 0.35, bassPresence: 0.4, textureAmount: 0.05,
        },
        nextStartMode: "main",
        form: [

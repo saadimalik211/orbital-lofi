@@ -6,6 +6,8 @@ export type InstrumentBuses = {
   drums: AudioNode;
   hats: AudioNode;
   bass: AudioNode;
+  /** Quiet octave layer. Saturated a little, then joined with the fundamental. */
+  bassHarmonic: AudioNode;
   keys: AudioNode;
   lead: AudioNode;
 };
@@ -64,6 +66,7 @@ export function createInstruments(
     hatBrightness: 0.4,
     chordWarmth: 0.6,
     leadBrightness: 0.4,
+    bassPresence: 0.4,
     textureAmount: 0,
   };
   /** Seeded Hz offset for the snare's tonal layer. Same seed, same pitch. */
@@ -135,6 +138,7 @@ export function createInstruments(
         hatBrightness: clamp01(next.hatBrightness),
         chordWarmth: clamp01(next.chordWarmth),
         leadBrightness: clamp01(next.leadBrightness),
+        bassPresence: clamp01(next.bassPresence),
         textureAmount: clamp01(next.textureAmount),
       };
       softness = clamp01(nextSoftness);
@@ -219,8 +223,14 @@ export function createInstruments(
       });
     },
 
-    bass(when: number, duration: number, midi: number, velocity: number) {
+    /**
+     * Sine fundamental plus a quiet triangle, kept clean. A softer sine an octave
+     * up carries the note on small speakers. `color` is a seeded 0–1 tone offset.
+     */
+    bass(when: number, duration: number, midi: number, velocity: number, color: number) {
       const level = Math.min(1.15, Math.max(0, velocity));
+      const vel = Math.min(1, level);
+      const presence = sound.bassPresence;
       const sub = context.createOscillator();
       const body = context.createOscillator();
       const bodyGain = context.createGain();
@@ -247,6 +257,28 @@ export function createInstruments(
       body.stop(stopAt + 0.02);
       register(sub, gain);
       register(body, bodyGain);
+
+      const harmonic = context.createGain();
+      const harmonicFilter = context.createBiquadFilter();
+      const octave = context.createOscillator();
+      harmonicFilter.type = "lowpass";
+      harmonicFilter.Q.value = 0.5;
+      harmonicFilter.frequency.setValueAtTime((260 + presence * 70 + vel * 140) * (0.94 + color * 0.1), when);
+      octave.type = "sine";
+      octave.frequency.value = freq * 2;
+      octave.detune.setValueAtTime((color - 0.5) * 3, when);
+      const harmonicStop = envelope(harmonic.gain, when, when + duration, (0.04 + presence * 0.07) * (0.78 + 0.32 * vel), {
+        attack: 0.01 + softness * 0.016,
+        decay: 0.3,
+        sustain: 0.72,
+        release: 0.12,
+      });
+      octave.connect(harmonicFilter);
+      harmonicFilter.connect(harmonic);
+      harmonic.connect(buses.bassHarmonic);
+      octave.start(when);
+      octave.stop(harmonicStop + 0.02);
+      register(octave, harmonicFilter, harmonic);
     },
 
     /**
@@ -357,15 +389,23 @@ export function createInstruments(
       });
     },
 
-    /** Soft plucked lead: sine plus a quiet detuned triangle through a closing low-pass. */
-    lead(when: number, duration: number, midi: number, velocity: number) {
+    /**
+     * Soft muted pluck. The body is still a quiet sine and triangle. A short octave
+     * partial gives the attack an identity, then the low-pass closes. `color` is a
+     * seeded 0–1 offset for cutoff and pan. The note stays left of center.
+     */
+    lead(when: number, duration: number, midi: number, velocity: number, color: number) {
       const bright = sound.leadBrightness;
       const level = Math.min(1.15, Math.max(0, velocity));
+      const vel = Math.min(1, level);
+      const shade = 0.94 + color * 0.1;
       const filter = context.createBiquadFilter();
+      const panner = context.createStereoPanner();
       filter.type = "lowpass";
       filter.Q.value = 0.5;
-      filter.frequency.setValueAtTime(700 + bright * 2400, when);
-      filter.frequency.setTargetAtTime(520 + bright * 900, when + 0.02, 0.1 + softness * 0.15);
+      filter.frequency.setValueAtTime((680 + bright * 2000) * shade * (0.9 + vel * 0.16), when);
+      filter.frequency.setTargetAtTime((480 + bright * 780) * (0.97 + color * 0.05), when + 0.018, 0.09 + softness * 0.14);
+      panner.pan.value = -0.12 + (color - 0.5) * 0.16;
       const env = context.createGain();
       const partial = context.createGain();
       partial.gain.value = 0.16;
@@ -376,24 +416,42 @@ export function createInstruments(
       const freq = midiToFreq(midi);
       sine.frequency.value = freq;
       triangle.frequency.value = freq;
-      triangle.detune.value = 7;
+      triangle.detune.value = 5 + color * 4;
       const stopAt = envelope(env.gain, when, when + duration, 0.08 * level, {
         attack: 0.008 + softness * 0.04,
         decay: 0.18 + softness * 0.2,
         sustain: 0.4,
-        release: 0.28 + softness * 0.3,
+        release: (0.28 + softness * 0.3) * (1.05 - vel * 0.1),
       });
       sine.connect(env);
       triangle.connect(partial);
       partial.connect(env);
       env.connect(filter);
-      filter.connect(buses.lead);
+
+      const pluck = context.createGain();
+      const octave = context.createOscillator();
+      octave.type = "sine";
+      octave.frequency.value = freq * 2;
+      octave.detune.value = 3 + color * 3;
+      const pluckStop = envelope(pluck.gain, when, when + 0.05, 0.08 * level * (0.2 + bright * 0.16) * (1 - softness * 0.28), {
+        attack: 0.006 + softness * 0.008,
+        decay: 0.035,
+        sustain: 0.1,
+        release: 0.05,
+      });
+      octave.connect(pluck);
+      pluck.connect(filter);
+      filter.connect(panner);
+      panner.connect(buses.lead);
       sine.start(when);
       triangle.start(when);
+      octave.start(when);
       sine.stop(stopAt + 0.02);
       triangle.stop(stopAt + 0.02);
-      register(sine, env, filter);
+      octave.stop(pluckStop + 0.02);
+      register(sine, env, filter, panner);
       register(triangle, partial);
+      register(octave, pluck);
     },
   };
 }

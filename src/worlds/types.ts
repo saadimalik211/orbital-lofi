@@ -75,6 +75,8 @@ export type MusicSound = {
   chordWarmth: number;
   /** How far the lead filter opens. */
   leadBrightness: number;
+  /** Octave harmonic on the bass, for speakers that miss the fundamental. 0 is almost none. */
+  bassPresence: number;
   /** Vinyl-style noise under the music. Even 1 stays very quiet. */
   textureAmount: number;
 };
