@@ -48,7 +48,7 @@ export type Composition = {
   bridge: ProgressionId;
   chordNames: string[];
   form: string;
-  arrangement: { groove: GrooveId; bass: BassId; voicing: "close" | "open" };
+  arrangement: { groove: GrooveId; bass: BassId; voicing: "close" | "open"; harmonic: HarmonicId };
   steps: number;
   swing: number;
   tape: { depth: number; wowRate: number; flutterRate: number };
@@ -78,7 +78,15 @@ function lateness(feel: Feel, step: number, amount = 1) {
   return step % STEPS_PER_BAR === 0 ? 0 : feel.rng.next() * feel.timing * amount;
 }
 
-type PlannedSection = MusicSection & { startBar: number; degrees: number[]; next: MusicSection };
+type PlannedSection = MusicSection & {
+  startBar: number;
+  degrees: number[];
+  /** Second chord in the bar, starting on beat 3. Null keeps one chord for the bar. */
+  splits: (number | null)[];
+  next: MusicSection;
+};
+
+export type HarmonicId = "long" | "mixed" | "balanced" | "pulsed";
 
 export type GrooveId = "sparse" | "halftime" | "kick-light" | "backbeat" | "syncopated";
 export type BassId = "anchor" | "held" | "fifth" | "sync" | "approach" | "octave";
@@ -136,10 +144,376 @@ function planForm(
       const swap = section.variation && turnaround !== null && finalPass && slot === progression.length - 1;
       return swap ? turnaround : progression[slot];
     });
-    const planned = { ...section, bars, startBar, degrees, next: form[(index + 1) % form.length] };
+    const planned = {
+      ...section,
+      bars,
+      startBar,
+      degrees,
+      splits: degrees.map(() => null),
+      next: form[(index + 1) % form.length],
+    };
     startBar += bars;
     return planned;
   });
+}
+
+/** Spacious profiles stay on long holds. A pulse profile can move, but still prefers its own pace. */
+function harmonicPool(profile: MusicProfile): HarmonicId[] {
+  if (profile.chords.rhythm === "pulse") {
+    return ["pulsed", "pulsed", "balanced", "mixed"];
+  }
+  if (profile.density.drums < 0.18 && profile.chords.barsPerChord >= 2) {
+    return ["long", "long", "long", "mixed"];
+  }
+  return ["long", "long", "mixed"];
+}
+
+function collapseDegrees(degrees: readonly number[]) {
+  const changes: number[] = [];
+  for (const degree of degrees) {
+    if (changes.length === 0 || changes[changes.length - 1] !== degree) {
+      changes.push(degree);
+    }
+  }
+  return changes;
+}
+
+/** A section often states its progression twice. Keep one loop, so holds can stretch it. */
+function progressionCycle(changes: number[]) {
+  for (let size = 1; size <= Math.floor(changes.length / 2); size += 1) {
+    if (changes.length % size !== 0) {
+      continue;
+    }
+    let repeats = true;
+    for (let i = 0; i < changes.length; i += 1) {
+      if (changes[i] !== changes[i % size]) {
+        repeats = false;
+        break;
+      }
+    }
+    if (repeats) {
+      return changes.slice(0, size);
+    }
+  }
+  return changes;
+}
+
+/** Spread `bars` across `count` chords. Never lands on a 3-bar hold. */
+function spreadHolds(count: number, bars: number, maxHold: 2 | 4) {
+  const n = Math.min(Math.max(count, 1), bars);
+  const sizes = Array.from({ length: n }, () => 1);
+  let left = bars - n;
+  for (let i = 0; i < n && left > 0; i += 1) {
+    let give = Math.min(maxHold - sizes[i], left);
+    if (sizes[i] + give === 3) {
+      give = left > give && sizes[i] + give + 1 <= maxHold ? give + 1 : Math.max(0, give - 1);
+    }
+    if (give > 0) {
+      sizes[i] += give;
+      left -= give;
+    }
+  }
+  while (left > 0) {
+    const extra = left === 3 ? 2 : Math.min(left, maxHold);
+    sizes.push(extra);
+    left -= extra;
+    if (left === 1 && extra === 2) {
+      sizes.push(1);
+      left = 0;
+    }
+  }
+  return sizes;
+}
+
+/** Fewer chords, grown from the front, so an intro can sit on one harmony for four bars. */
+function longHolds(count: number, bars: number) {
+  const slots = Math.min(count, Math.max(1, Math.ceil(bars / 3)));
+  return spreadHolds(slots, bars, 4);
+}
+
+/** Two chords across the section when it is long enough: four bars, then four bars. */
+function spaciousHolds(count: number, bars: number) {
+  const slots = Math.min(count, Math.max(1, Math.ceil(bars / 4)));
+  return spreadHolds(slots, bars, 4);
+}
+
+function twoBarHolds(count: number, bars: number) {
+  return spreadHolds(Math.min(count, bars), bars, 2);
+}
+
+function oneBarHolds(bars: number) {
+  return Array.from({ length: bars }, () => 1);
+}
+
+/** Turn the last hold into two shorter ones so a section can cadence a little sooner. */
+function withTailMotion(sizes: number[]) {
+  if (sizes.length < 2 || sizes[sizes.length - 1] < 2) {
+    return sizes;
+  }
+  const next = [...sizes];
+  next[next.length - 1] -= 1;
+  next.splice(next.length - 1, 0, 1);
+  return next;
+}
+
+type SectionRole = "intro" | "a" | "a-var" | "return" | "b" | "breakdown";
+
+function sectionRole(section: MusicSection, index: number, form: readonly PlannedSection[]): SectionRole {
+  if (section.kind === "intro") {
+    return "intro";
+  }
+  if (section.kind === "breakdown") {
+    return "breakdown";
+  }
+  if (section.kind === "b") {
+    return "b";
+  }
+  if (section.variation) {
+    return "a-var";
+  }
+  if (index > 0 && form[index - 1]?.kind === "breakdown") {
+    return "return";
+  }
+  return "a";
+}
+
+function durationSlots(id: HarmonicId, role: SectionRole, longest: boolean, count: number, bars: number) {
+  const slow = role === "intro" || role === "breakdown";
+  if (id === "pulsed" || id === "balanced") {
+    return slow ? twoBarHolds(Math.max(1, Math.floor(bars / 2)), bars) : oneBarHolds(bars);
+  }
+  if (id === "mixed") {
+    if (slow) {
+      return longest ? spaciousHolds(count, bars) : longHolds(count, bars);
+    }
+    if (role === "b") {
+      return longest ? withTailMotion(twoBarHolds(count, bars)) : oneBarHolds(bars);
+    }
+    if (role === "a-var" && !longest) {
+      return withTailMotion(twoBarHolds(count, bars));
+    }
+    return twoBarHolds(count, bars);
+  }
+  if (slow || (longest && role === "b")) {
+    return spaciousHolds(count, bars);
+  }
+  if (role === "a-var" && !longest) {
+    return withTailMotion(twoBarHolds(count, bars));
+  }
+  return twoBarHolds(count, bars);
+}
+
+/**
+ * Retimes the chords already chosen for each section. The order stays; only the
+ * bar lengths change. Uses `harm` so the main random stream is left alone.
+ */
+function applyHarmonicRhythm(sections: PlannedSection[], profile: MusicProfile, harm: Rng): HarmonicId {
+  const id = harm.pick(harmonicPool(profile));
+  const longest = profile.chords.rhythm !== "pulse" && profile.density.drums < 0.18;
+  const holdAt = id === "balanced" ? harm.int(1, 4) : -1;
+  let splitsLeft = id === "balanced" && harm.chance(0.55) ? 1 : 0;
+  let holdLeft = holdAt >= 0 ? 1 : 0;
+
+  for (let index = 0; index < sections.length; index += 1) {
+    const section = sections[index];
+    const role = sectionRole(section, index, sections);
+    const changes = collapseDegrees(section.degrees);
+    const cycle = progressionCycle(changes);
+    const sizes = durationSlots(id, role, longest, Math.max(cycle.length, 1), section.bars);
+    const degrees: number[] = [];
+    const source = cycle.length > 0 ? cycle : section.degrees;
+    sizes.forEach((size, chord) => {
+      const degree = source[chord % source.length];
+      for (let i = 0; i < size; i += 1) {
+        degrees.push(degree);
+      }
+    });
+    if (section.variation && degrees.length > 0 && degrees[degrees.length - 1] !== section.degrees[section.bars - 1]) {
+      degrees[degrees.length - 1] = section.degrees[section.bars - 1];
+    }
+    if (holdLeft > 0 && role === "a" && degrees.length > 2) {
+      const at = holdAt % (degrees.length - 1);
+      if (degrees[at] !== degrees[at + 1]) {
+        degrees[at + 1] = degrees[at];
+        holdLeft = 0;
+      }
+    }
+    const cadence =
+      (id === "long" && !longest && (role === "a-var" || role === "b")) ||
+      (id === "mixed" && !longest && role === "a-var") ||
+      (id === "mixed" && longest && role === "b");
+    if (cadence && degrees.length >= 4 && degrees[degrees.length - 1] === degrees[degrees.length - 2]) {
+      const at = source.indexOf(degrees[degrees.length - 1]);
+      const following = source[at < 0 ? 0 : (at + 1) % source.length];
+      if (following !== undefined && following !== degrees[degrees.length - 1]) {
+        degrees[degrees.length - 1] = following;
+      }
+    }
+    const splits = degrees.map(() => null as number | null);
+    if (splitsLeft > 0 && role === "b" && degrees.length > 1 && changes.length > 0) {
+      const bar = degrees.length - 1;
+      const following = changes[(changes.indexOf(degrees[bar]) + 1) % changes.length];
+      if (following !== undefined && following !== degrees[bar]) {
+        splits[bar] = following;
+        splitsLeft = 0;
+      }
+    }
+    while (degrees.length < section.bars) {
+      degrees.push(degrees[degrees.length - 1] ?? source[0] ?? 0);
+      splits.push(null);
+    }
+    section.degrees = degrees.slice(0, section.bars);
+    section.splits = splits.slice(0, section.bars);
+  }
+  return id;
+}
+
+function pulseThisSection(profile: MusicProfile, id: HarmonicId, role: SectionRole) {
+  if (profile.chords.rhythm !== "pulse") {
+    return false;
+  }
+  if (role === "intro" || role === "breakdown") {
+    return false;
+  }
+  return id === "pulsed" || id === "balanced" || id === "mixed";
+}
+
+function renderHarmony(
+  profile: MusicProfile,
+  scale: readonly number[],
+  keyPc: number,
+  sections: PlannedSection[],
+  harm: Rng,
+  feel: Feel,
+  openVoicing: boolean,
+  id: HarmonicId,
+) {
+  const events: ChordEvent[] = [];
+  const pulseStep = harm.pick([10, 11, 14]);
+  const strum = 0.005 + harm.next() * 0.008;
+  const softness = clamp01(profile.space.softness);
+  let previous: number[] | null = null;
+  let dropFifth = false;
+
+  const emit = (
+    step: number,
+    length: number,
+    velocity: number,
+    voicing: number[],
+    {
+      spread,
+      rootPc,
+      omitRoot,
+      reshape,
+      dropFifth: drop,
+    }: { spread: number; rootPc: number; omitRoot: boolean; reshape: boolean; dropFifth: boolean },
+  ) => {
+    let notes = omitRoot ? voicing.filter((note) => note % 12 !== rootPc) : [...voicing];
+    if (drop) {
+      const fifth = (rootPc + 7) % 12;
+      const kept = notes.filter((note) => note % 12 !== fifth);
+      if (kept.length >= 3) {
+        notes = kept;
+      }
+    }
+    if (reshape) {
+      const top = notes[notes.length - 1];
+      const rootAbove = top + 1 + ((((rootPc - top - 1) % 12) + 12) % 12);
+      notes = rootAbove <= 79 && rootAbove - top <= 7 ? [...notes, rootAbove] : notes.slice(1);
+    }
+    events.push({
+      step,
+      length,
+      velocity: humanize(feel, velocity, 0.5),
+      nudge: lateness(feel, step, 0.5),
+      notes,
+      delays: notes.map((_, i) => i * spread),
+      levels: notes.map((_, i) => humanize(feel, i === notes.length - 1 ? 1.06 : 1, 0.7)),
+      release: 0.85 + feel.rng.next() * 0.35,
+    });
+  };
+
+  for (let index = 0; index < sections.length; index += 1) {
+    const section = sections[index];
+    const role = sectionRole(section, index, sections);
+    const soft = section.kind === "intro" ? 0.85 : 1;
+    const pulse = pulseThisSection(profile, id, role);
+    const arpeggioSection = section.kind === "intro" || section.kind === "breakdown";
+    let bar = 0;
+    while (bar < section.bars) {
+      const degree = section.degrees[bar];
+      const split = section.splits[bar];
+      let run = 1;
+      if (split === null) {
+        while (
+          bar + run < section.bars &&
+          section.degrees[bar + run] === degree &&
+          section.splits[bar + run] === null
+        ) {
+          run += 1;
+        }
+      }
+      const startChange = bar === 0 || section.degrees[bar] !== section.degrees[bar - 1] || split !== null;
+      let voicing: number[] = previous ?? [];
+      if (startChange || !previous) {
+        const pcs = chordSemitones(scale, degree, profile.chords.style).map((s) => (keyPc + s) % 12);
+        const nearest = voiceChord(pcs, previous, undefined, openVoicing && previous === null);
+        const alternate = section.variation && bar === 0 ? voiceChord(pcs, previous, nearest) : [];
+        voicing = alternate.length > 0 ? alternate : nearest;
+        dropFifth = openVoicing && voicing.length >= 4 && section.bass > 0 && harm.chance(0.12);
+      }
+      previous = voicing;
+      const start = (section.startBar + bar) * STEPS_PER_BAR;
+      const rootPc = (keyPc + degreeToSemitones(scale, degree)) % 12;
+      const omit = (chance: number) => voicing.length >= 4 && section.bass > 0 && harm.chance(chance);
+      const lastBar = bar + run >= section.bars;
+      const reshape = lastBar && harm.chance(0.4);
+
+      if (split !== null) {
+        emit(start, 7, 0.8 * soft, voicing, { spread: strum, rootPc, omitRoot: false, reshape: false, dropFifth });
+        const nextPcs = chordSemitones(scale, split, profile.chords.style).map((s) => (keyPc + s) % 12);
+        const nextVoicing = voiceChord(nextPcs, voicing);
+        const nextRoot = (keyPc + degreeToSemitones(scale, split)) % 12;
+        emit(start + 8, 7, 0.72 * soft, nextVoicing, {
+          spread: strum,
+          rootPc: nextRoot,
+          omitRoot: false,
+          reshape,
+          dropFifth: false,
+        });
+        previous = nextVoicing;
+        bar += 1;
+        continue;
+      }
+
+      if (pulse) {
+        for (let i = 0; i < run; i += 1) {
+          const at = start + i * STEPS_PER_BAR;
+          emit(at, 6, 0.85 * soft, voicing, { spread: strum, rootPc, omitRoot: false, reshape: false, dropFifth });
+          if (!harm.chance(0.1)) {
+            emit(at + pulseStep, 3, 0.55 * soft, voicing, {
+              spread: strum * 0.5,
+              rootPc,
+              omitRoot: omit(0.3),
+              reshape: i === run - 1 && reshape,
+              dropFifth,
+            });
+          }
+        }
+      } else {
+        const arpeggio = arpeggioSection && harm.chance(0.4 + softness * 0.4);
+        emit(start, run * STEPS_PER_BAR - 1, 0.8 * soft, voicing, {
+          spread: arpeggio ? 0.045 + harm.next() * 0.045 : strum,
+          rootPc,
+          omitRoot: omit(0.15),
+          reshape,
+          dropFifth,
+        });
+      }
+      bar += run;
+    }
+  }
+  return events;
 }
 
 function buildChords(
@@ -305,11 +679,11 @@ function buildBass(
     const level = clamp01(profile.density.bass) * clamp01(section.bass);
     const pattern = BASS_ARCHETYPES[bassId];
     const alteredBar = section.variation ? rng.int(1, Math.max(1, section.bars - 1)) : -1;
-    let skip = false;
+    let skip = 0;
 
     for (let bar = 0; bar < section.bars; bar += 1) {
-      if (skip) {
-        skip = false;
+      if (skip > 0) {
+        skip -= 1;
         continue;
       }
       const absBar = section.startBar + bar;
@@ -318,6 +692,7 @@ function buildBass(
       const root = bassRoot(keyPc, scale, degree);
       const triad = chordSemitones(scale, degree, "triad");
       const changes = nextDegree !== degree;
+      const split = section.splits[bar];
       const lastBar = bar === section.bars - 1;
       const tailRest = lastBar && section.next.bass <= 0;
       let slots = pattern.map((slot) => ({ ...slot }));
@@ -326,13 +701,17 @@ function buildBass(
         const rootSlot = slots.find((slot) => slot.tone === "root") ?? { step: 0, length: 12, tone: "root" as const };
         slots = [{ ...rootSlot }];
       }
-      let span = 1;
-      if (bassId === "held" && !changes && bar + 1 < section.bars && !tailRest) {
-        slots = [{ step: 0, length: 30, tone: "root" }];
-        span = 2;
+      let spanBars = 1;
+      if (bassId === "held" && !changes && !tailRest) {
+        while (spanBars < 4 && bar + spanBars < section.bars && degreeAt[absBar + spanBars] === degree) {
+          spanBars += 1;
+        }
+      }
+      if (spanBars > 1) {
+        slots = [{ step: 0, length: spanBars * STEPS_PER_BAR - 2, tone: "root" }];
       }
       // One altered note per variation section keeps repeats from being literal copies.
-      if (bar === alteredBar && span === 1 && !tailRest) {
+      if (bar === alteredBar && spanBars === 1 && !tailRest) {
         const fifth = slots.findIndex((slot) => slot.tone === "fifth");
         if (fifth >= 0) {
           slots[fifth] = { ...slots[fifth], tone: "octave" };
@@ -346,13 +725,16 @@ function buildBass(
         if ((slot.tone === "approach" && !changes) || (tailRest && slot.step >= 8)) {
           return;
         }
-        let midi = root;
+        const localDegree = split !== null && slot.step >= 8 && slot.tone !== "approach" ? split : degree;
+        const localRoot = localDegree === degree ? root : bassRoot(keyPc, scale, localDegree);
+        const localTriad = localDegree === degree ? triad : chordSemitones(scale, localDegree, "triad");
+        let midi = localRoot;
         if (slot.tone === "octave") {
-          midi = root + 12;
+          midi = localRoot + 12;
         } else if (slot.tone === "fifth") {
-          midi = root + (triad[2] - triad[0]);
+          midi = localRoot + (localTriad[2] - localTriad[0]);
         } else if (slot.tone === "third") {
-          midi = root + (triad[1] - triad[0]);
+          midi = localRoot + (localTriad[1] - localTriad[0]);
         } else if (slot.tone === "approach") {
           // Diatonic step below the next root.
           const stepDown = degreeToSemitones(scale, nextDegree) - degreeToSemitones(scale, nextDegree - 1);
@@ -366,7 +748,7 @@ function buildBass(
           nudge: lateness(feel, slot.step, 0.6),
         });
       });
-      skip = span === 2;
+      skip = spanBars - 1;
     }
   }
   return events;
@@ -640,11 +1022,15 @@ function buildMelody(
       const developed = developMotif(motif, move, endingDir);
       const shape = section.kind === "b" ? { ...developed, startTone: developed.startTone + 1 } : developed;
 
-      const chordDegree = section.degrees[bar];
+      const firstStep = shape.steps[0] + delay;
+      const lastStep = shape.steps[shape.steps.length - 1] + delay;
+      const splitDegree = section.splits[bar];
+      const chordDegree = firstStep >= 8 && splitDegree !== null ? splitDegree : section.degrees[bar];
+      const resolveDegree = lastStep >= 8 && splitDegree !== null ? splitDegree : chordDegree;
       const degrees = shape.contour.map((c) => snap(chordDegree + shape.startTone * 2 + c));
       // Resolve on the chord's root or third, whichever is nearest.
       const last = degrees.length - 1;
-      const targets = [-7, -5, 0, 2, 7, 9].map((t) => chordDegree + t);
+      const targets = [-7, -5, 0, 2, 7, 9].map((t) => resolveDegree + t);
       degrees[last] = targets.reduce((a, b) => (Math.abs(b - degrees[last]) < Math.abs(a - degrees[last]) ? b : a));
 
       // Centre the phrase near G4–A4 and keep it under G5, so high notes stay rare.
@@ -712,7 +1098,15 @@ export function compose(profile: MusicProfile, seed: number): Composition {
   const bridge = others.length > 0 ? rng.pick(others) : progression;
   const sections = planForm(profile, PROGRESSIONS[progression], PROGRESSIONS[bridge], chosenForm, rng);
 
-  const chords = buildChords(profile, scale, keyPc, sections, rng, feel, openVoicing);
+  // Same draws as the previous chord pass, so form, groove, bass, and motif stay put.
+  buildChords(profile, scale, keyPc, sections, rng, feel, openVoicing);
+  const harm = createRng((seed ^ 0x6c8e9cf5) >>> 0);
+  const harmonic = applyHarmonicRhythm(sections, profile, harm);
+  const chords = renderHarmony(profile, scale, keyPc, sections, harm, {
+    rng: createRng((seed ^ 0x4b1d3c2a) >>> 0),
+    timing: feel.timing,
+    velocity: feel.velocity,
+  }, openVoicing, harmonic);
   const bass = buildBass(profile, scale, keyPc, sections, rng, feel, bassId);
   const melody = buildMelody(profile, scale, keyPc, sections, rng, feel, homeForm && !busyGroove(grooveId));
   const drums = buildDrums(profile, sections, rng, feel, grooveId);
@@ -732,7 +1126,7 @@ export function compose(profile: MusicProfile, seed: number): Composition {
     bridge,
     chordNames,
     form: sections.map((s) => `${SECTION_LABEL[s.kind]}${s.variation ? "'" : ""}${s.bars}`).join(" "),
-    arrangement: { groove: grooveId, bass: bassId, voicing: openVoicing ? "open" : "close" },
+    arrangement: { groove: grooveId, bass: bassId, voicing: openVoicing ? "open" : "close", harmonic },
     steps: totalBars * STEPS_PER_BAR,
     swing: clamp(groove.swing ?? 0, 0, 0.3),
     tape,
@@ -754,5 +1148,5 @@ export function compose(profile: MusicProfile, seed: number): Composition {
 
 export function describeComposition(c: Composition) {
   const bars = c.steps / STEPS_PER_BAR;
-  return `seed=${c.seed} ${c.bpm}bpm ${c.key} ${c.scale} [${c.progression} | B ${c.bridge}] ${c.chordNames.join(" ")} · ${c.arrangement.groove}/${c.arrangement.bass}/${c.arrangement.voicing} · ${bars} bars: ${c.form}`;
+  return `seed=${c.seed} ${c.bpm}bpm ${c.key} ${c.scale} [${c.progression} | B ${c.bridge}] ${c.chordNames.join(" ")} · ${c.arrangement.groove}/${c.arrangement.bass}/${c.arrangement.harmonic} · ${bars} bars: ${c.form}`;
 }
