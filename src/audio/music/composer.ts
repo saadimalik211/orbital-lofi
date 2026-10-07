@@ -48,7 +48,13 @@ export type Composition = {
   bridge: ProgressionId;
   chordNames: string[];
   form: string;
-  arrangement: { groove: GrooveId; bass: BassId; voicing: "close" | "open"; harmonic: HarmonicId };
+  arrangement: {
+    groove: GrooveId;
+    bass: BassId;
+    voicing: "close" | "open";
+    harmonic: HarmonicId;
+    melody: { motif: MotifId; rhythm: MelodicRhythm; contour: MelodicContour; register: MelodicRegister };
+  };
   steps: number;
   swing: number;
   tape: { depth: number; wowRate: number; flutterRate: number };
@@ -87,6 +93,10 @@ type PlannedSection = MusicSection & {
 };
 
 export type HarmonicId = "long" | "mixed" | "balanced" | "pulsed";
+export type MotifId = "descend" | "held" | "repeat" | "neighbor" | "leap" | "call" | "pickup";
+export type MelodicRhythm = "long-short" | "short-rest" | "even-resolve" | "sustain" | "sparse" | "sync";
+export type MelodicContour = "down" | "up" | "arch" | "valley" | "repeat" | "leap" | "neighbor";
+export type MelodicRegister = "low" | "mid" | "high";
 
 export type GrooveId = "sparse" | "halftime" | "kick-light" | "backbeat" | "syncopated";
 export type BassId = "anchor" | "held" | "fifth" | "sync" | "approach" | "octave";
@@ -1070,6 +1080,416 @@ function buildMelody(
   return events;
 }
 
+type MelodicCharacter = "drifting" | "hook" | "modal";
+type MelodyTransform = "same" | "transpose" | "invert" | "ending" | "omit" | "extend" | "shift" | "octave";
+
+/** Pulse worlds can carry a short hook. Very quiet pentatonic worlds stay modal. */
+function melodicCharacter(profile: MusicProfile): MelodicCharacter {
+  if (profile.chords.rhythm === "pulse") {
+    return "hook";
+  }
+  if (profile.density.melody < 0.1 && profile.melodyScale === "pentatonic") {
+    return "modal";
+  }
+  return "drifting";
+}
+
+function motifPool(character: MelodicCharacter): MotifId[] {
+  if (character === "hook") {
+    return ["call", "call", "repeat", "repeat", "pickup", "pickup", "neighbor", "leap"];
+  }
+  if (character === "modal") {
+    return ["leap", "leap", "held", "held", "descend", "descend", "neighbor"];
+  }
+  return ["descend", "descend", "descend", "held", "held", "repeat", "repeat", "neighbor"];
+}
+
+function registerPool(character: MelodicCharacter): MelodicRegister[] {
+  if (character === "hook") {
+    return ["mid", "mid", "high", "low"];
+  }
+  if (character === "modal") {
+    return ["low", "low", "low", "mid"];
+  }
+  return ["low", "low", "mid"];
+}
+
+const REGISTER_CENTER: Record<MelodicCharacter, Record<MelodicRegister, number>> = {
+  drifting: { low: 64, mid: 67, high: 70 },
+  modal: { low: 62, mid: 65, high: 67 },
+  hook: { low: 67, mid: 70, high: 73 },
+};
+
+const MOTIF_RHYTHM: Record<MotifId, MelodicRhythm> = {
+  descend: "long-short",
+  held: "sustain",
+  repeat: "even-resolve",
+  neighbor: "sparse",
+  leap: "short-rest",
+  call: "even-resolve",
+  pickup: "sync",
+};
+
+const MOTIF_CONTOUR: Record<MotifId, MelodicContour> = {
+  descend: "down",
+  held: "down",
+  repeat: "repeat",
+  neighbor: "neighbor",
+  leap: "leap",
+  call: "up",
+  pickup: "up",
+};
+
+function chooseRhythm(home: MelodicRhythm, character: MelodicCharacter, rng: Rng): MelodicRhythm {
+  if (character !== "hook" && home === "sync") {
+    return "long-short";
+  }
+  if (rng.chance(0.8)) {
+    return home;
+  }
+  const options: MelodicRhythm[] =
+    character === "hook" ? [home, "even-resolve", "sparse", "short-rest"] : [home, "long-short", "sustain", "sparse"];
+  return rng.pick(options);
+}
+
+function chooseContour(home: MelodicContour, character: MelodicCharacter, rng: Rng): MelodicContour {
+  if (rng.chance(0.58)) {
+    return home;
+  }
+  if (home === "leap") {
+    return rng.pick(["down", "neighbor"]);
+  }
+  if (character === "hook") {
+    return rng.pick(["up", "repeat", "neighbor", "arch"]);
+  }
+  return rng.pick(["down", "arch", "valley", "neighbor"]);
+}
+
+/** A syncopated phrase keeps a simple line. A leap does not also syncopate. */
+function simplifyPair(rhythm: MelodicRhythm, contour: MelodicContour) {
+  if (rhythm === "sync" && (contour === "leap" || contour === "arch" || contour === "valley")) {
+    return { rhythm, contour: "up" as MelodicContour };
+  }
+  if (contour === "leap" && rhythm === "sync") {
+    return { rhythm: "short-rest" as MelodicRhythm, contour };
+  }
+  return { rhythm, contour };
+}
+
+function phraseEvery(character: MelodicCharacter, level: number, rng: Rng) {
+  if (character === "hook") {
+    if (level >= 0.22) {
+      return rng.pick([4, 4, 6, 4]);
+    }
+    if (level >= 0.12) {
+      return rng.pick([4, 6, 4]);
+    }
+    return 8;
+  }
+  if (level >= 0.08) {
+    return rng.pick([8, 8, 8, 6]);
+  }
+  return 8;
+}
+
+function rhythmShape(rhythm: MelodicRhythm, count: number) {
+  const shapes: Record<MelodicRhythm, { steps: number[]; lengths: number[] }> = {
+    "long-short": { steps: [0, 8, 10], lengths: [6, 2, 2] },
+    "short-rest": { steps: [0, 6, 8], lengths: [2, 2, 6] },
+    "even-resolve": { steps: [0, 8, 12], lengths: [3, 3, 3] },
+    sustain: { steps: [0, 10], lengths: [8, 3] },
+    sparse: { steps: [2, 8, 12], lengths: [3, 2, 3] },
+    sync: { steps: [3, 6, 10], lengths: [2, 3, 4] },
+  };
+  const shape = shapes[rhythm];
+  const notes = Math.max(1, Math.min(count, shape.steps.length));
+  return { steps: shape.steps.slice(0, notes), lengths: shape.lengths.slice(0, notes) };
+}
+
+function contourShape(contour: MelodicContour, count: number, leap: number) {
+  const table: Record<MelodicContour, number[]> = {
+    down: [0, -1, -2],
+    up: [0, 1, 2],
+    arch: [0, 1, 0],
+    valley: [0, -1, 0],
+    repeat: [0, 0, 1],
+    leap: [0, leap, leap > 0 ? leap - 1 : leap + 1],
+    neighbor: [0, 1, 0],
+  };
+  const notes = Math.max(1, Math.min(count, 3));
+  return table[contour].slice(0, notes);
+}
+
+function invertContour(contour: readonly number[]) {
+  const next = contour.map((value, index) => (index === 0 ? 0 : -value));
+  if (next.length > 1 && next.every((value, index) => value === contour[index])) {
+    next[next.length - 1] -= 1;
+  }
+  return next;
+}
+
+function answerRhythm(rhythm: MelodicRhythm): MelodicRhythm {
+  if (rhythm === "sync") {
+    return "even-resolve";
+  }
+  if (rhythm === "long-short") {
+    return "sparse";
+  }
+  return rhythm;
+}
+
+function motifNotes(motif: MotifId) {
+  return motif === "call" || motif === "held" ? 2 : 3;
+}
+
+function degreePitchClass(scale: readonly number[], degree: number, keyPc: number) {
+  return (((keyPc + degreeToSemitones(scale, degree)) % 12) + 12) % 12;
+}
+
+/** Closest scale degree whose pitch is actually in the sounding chord. */
+function nearestVoicedDegree(desired: number, scale: readonly number[], keyPc: number, chordPcs: ReadonlySet<number>) {
+  let best = desired;
+  let bestDist = 100;
+  for (let delta = -10; delta <= 10; delta += 1) {
+    const candidate = desired + delta;
+    if (!chordPcs.has(degreePitchClass(scale, candidate, keyPc))) {
+      continue;
+    }
+    if (Math.abs(delta) < bestDist) {
+      best = candidate;
+      bestDist = Math.abs(delta);
+    }
+  }
+  return bestDist < 100 ? best : desired;
+}
+
+function pullInterval(degree: number, previous: number) {
+  let next = degree;
+  while (next - previous > 4) {
+    next -= 7;
+  }
+  while (previous - next > 4) {
+    next += 7;
+  }
+  return next;
+}
+
+function soundingPcs(chords: readonly ChordEvent[], bar: number, stepInBar: number) {
+  let cover: ChordEvent | null = null;
+  for (const event of chords) {
+    const eventBar = Math.floor(event.step / 16);
+    const eventStep = event.step % 16;
+    if (eventStep === 8 && event.length >= 7 && eventBar === bar && stepInBar >= 8) {
+      return [...new Set(event.notes.map((midi) => ((midi % 12) + 12) % 12))];
+    }
+    if (eventStep !== 0) {
+      continue;
+    }
+    if (event.length >= 15) {
+      const hold = (event.length + 1) / 16;
+      if (bar >= eventBar && bar < eventBar + hold) {
+        cover = event;
+      }
+    } else if (eventBar === bar) {
+      cover = event;
+    }
+  }
+  return cover ? [...new Set(cover.notes.map((midi) => ((midi % 12) + 12) % 12))] : [];
+}
+
+function renderMelody(
+  profile: MusicProfile,
+  scale: readonly number[],
+  keyPc: number,
+  sections: PlannedSection[],
+  chords: readonly ChordEvent[],
+  rng: Rng,
+  feel: Feel,
+) {
+  const character = melodicCharacter(profile);
+  const motif = rng.pick(motifPool(character));
+  const leap = (character === "modal" ? 4 : 3) * (rng.chance(0.5) ? 1 : -1);
+  const register = rng.pick(registerPool(character));
+  const paired = simplifyPair(chooseRhythm(MOTIF_RHYTHM[motif], character, rng), chooseContour(MOTIF_CONTOUR[motif], character, rng));
+  const rhythm = paired.rhythm;
+  const contour = paired.contour;
+  const startTone = rng.pick(character === "hook" ? [0, 2, 4] : [0, 2]);
+  const simplifyReturn = rng.chance(0.55);
+  const peak = clamp01(profile.density.melody);
+  const minorThird = scale[2] === 3;
+  const allowed =
+    profile.melodyScale === "pentatonic" ? (minorThird ? [0, 2, 3, 4, 6] : [0, 1, 2, 4, 5]) : [0, 1, 2, 3, 4, 5, 6];
+  const snap = (degree: number) => {
+    const octave = Math.floor(degree / 7);
+    const within = ((degree % 7) + 7) % 7;
+    const nearest = allowed.reduce((a, b) => (Math.abs(b - within) < Math.abs(a - within) ? b : a));
+    return octave * 7 + nearest;
+  };
+  const toMidi = (degree: number) => 60 + keyPc + degreeToSemitones(scale, degree);
+  const center = REGISTER_CENTER[character][register];
+  const answerTone = startTone === 0 ? 2 : 0;
+  let primaryStatements = 0;
+
+  const events: NoteEvent[] = [];
+
+  const emit = (
+    section: PlannedSection,
+    bar: number,
+    family: "A" | "B" | "C" | "tone",
+    transform: MelodyTransform,
+  ) => {
+    let useRhythm = family === "B" ? answerRhythm(rhythm) : rhythm;
+    let useStart = family === "B" ? answerTone : startTone;
+    let count = family === "tone" ? 1 : family === "C" ? (character === "hook" ? 2 : 1) : motifNotes(motif);
+    if (family === "C") {
+      useRhythm = count === 1 ? "sustain" : rhythm;
+    }
+    if (transform === "transpose") {
+      useStart = useStart === 0 ? 2 : useStart === 2 ? 4 : 0;
+    }
+    if (transform === "omit" && count > 2) {
+      count -= 1;
+    }
+    const shape = rhythmShape(useRhythm, count);
+    if (family === "tone") {
+      shape.steps = [0];
+      shape.lengths = [12];
+    }
+    let line = contourShape(contour, shape.steps.length, leap);
+    if (family === "B" || transform === "invert") {
+      line = invertContour(line);
+    }
+    if (transform === "shift" && useRhythm !== "sync" && shape.steps[shape.steps.length - 1] + 2 <= 12) {
+      shape.steps = shape.steps.map((step) => step + 2);
+    }
+    if (transform === "extend") {
+      const last = shape.lengths.length - 1;
+      shape.lengths[last] = Math.min(shape.lengths[last] + 4, 16 - shape.steps[last]);
+    }
+    const lastStep = shape.steps[shape.steps.length - 1];
+    const delay =
+      useRhythm === "sync" || lastStep + shape.lengths[shape.lengths.length - 1] + 2 > 16
+        ? 0
+        : rng.chance(0.2)
+          ? 2
+          : 0;
+    const colorEnding = transform === "ending" || (character === "modal" && family !== "tone" && rng.chance(0.55));
+    const degrees: number[] = [];
+    for (let i = 0; i < shape.steps.length; i += 1) {
+      const stepInBar = shape.steps[i] + delay;
+      const chord = section.splits[bar] !== null && stepInBar >= 8 ? section.splits[bar]! : section.degrees[bar];
+      const voiced = soundingPcs(chords, section.startBar + bar, stepInBar);
+      const chordPcs = new Set(
+        voiced.length > 0 ? voiced : chordSemitones(scale, chord, profile.chords.style).map((semitone) => (keyPc + semitone) % 12),
+      );
+      const desired = chord + useStart + (line[i] ?? 0);
+      const strong =
+        i === 0 || i === shape.steps.length - 1 || stepInBar % 4 === 0 || Math.abs((line[i] ?? 0) - (line[i - 1] ?? 0)) >= 3;
+      let degree = strong ? nearestVoicedDegree(desired, scale, keyPc, chordPcs) : snap(desired);
+      if (colorEnding && i === shape.steps.length - 1 && chordPcs.size > 1) {
+        const rootPc = degreePitchClass(scale, chord, keyPc);
+        const rest = new Set([...chordPcs].filter((pc) => pc !== rootPc));
+        if (rest.size > 0) {
+          degree = nearestVoicedDegree(desired, scale, keyPc, rest);
+        }
+      }
+      if (i > 0) {
+        degree = pullInterval(degree, degrees[i - 1]);
+      }
+      degrees.push(degree);
+    }
+    const pitches = degrees.map(toMidi);
+    const low = Math.min(...pitches);
+    const high = Math.max(...pitches);
+    const mean = pitches.reduce((sum, midi) => sum + midi, 0) / pitches.length;
+    const place = center + (family === "B" ? (character === "hook" ? 2 : -2) : 0);
+    const shifts = [-24, -12, 0, 12].filter((shift) => high + shift <= 76 && low + shift >= 60);
+    const shift = (shifts.length > 0 ? shifts : [-12]).reduce((a, b) =>
+      Math.abs(mean + b - place) < Math.abs(mean + a - place) ? b : a,
+    );
+    let midis = pitches.map((midi) => midi + shift);
+    if (transform === "octave" && midis.length > 2 && midis[1] - 12 >= 60) {
+      const dropped = midis[1] - 12;
+      if (Math.abs(dropped - midis[0]) <= 12 && Math.abs(dropped - (midis[2] ?? midis[0])) <= 12) {
+        midis[1] = dropped;
+      }
+    }
+    for (let guard = 0; guard < 3; guard += 1) {
+      const lowNote = Math.min(...midis);
+      const highNote = Math.max(...midis);
+      if (lowNote >= 60 && highNote <= 76) {
+        break;
+      }
+      if (lowNote < 60 && highNote + 12 <= 76) {
+        midis = midis.map((midi) => midi + 12);
+      } else if (highNote > 76 && lowNote - 12 >= 60) {
+        midis = midis.map((midi) => midi - 12);
+      } else {
+        break;
+      }
+    }
+    midis = midis.map((midi) => {
+      let note = midi;
+      while (note < 60) {
+        note += 12;
+      }
+      while (note > 76) {
+        note -= 12;
+      }
+      return note;
+    });
+    const barStart = (section.startBar + bar) * STEPS_PER_BAR;
+    midis.forEach((midi, i) => {
+      events.push({
+        step: barStart + shape.steps[i] + delay,
+        length: shape.lengths[i],
+        midi,
+        velocity: humanize(feel, i === 0 ? 0.7 : i === midis.length - 1 ? 0.52 : 0.6),
+        nudge: lateness(feel, shape.steps[i] + delay),
+      });
+    });
+  };
+
+  sections.forEach((section, index) => {
+    const level = peak * clamp01(section.melody);
+    if (level <= 0) {
+      return;
+    }
+    const role = sectionRole(section, index, sections);
+    if (role === "breakdown") {
+      emit(section, Math.min(2, section.bars - 1), "tone", "same");
+      return;
+    }
+    if (role === "intro") {
+      emit(section, section.bars > 2 ? Math.min(2, section.bars - 1) : 0, "C", "same");
+      return;
+    }
+    const every = phraseEvery(character, level, rng);
+    const offset = every <= 2 ? 1 : 1 + rng.int(0, Math.min(1, every - 2));
+    for (let bar = offset; bar < section.bars; bar += every) {
+      const family = role === "b" ? "B" : "A";
+      let transform: MelodyTransform = "same";
+      if (role === "a-var") {
+        const moves: MelodyTransform[] =
+          character === "hook"
+            ? ["transpose", "omit", "ending", "shift", "octave"]
+            : character === "modal"
+              ? ["ending", "extend", "invert"]
+              : ["transpose", "ending", "extend"];
+        transform = rng.pick(moves);
+      } else if (role === "return") {
+        transform = simplifyReturn && motifNotes(motif) > 2 ? "omit" : "same";
+      } else if (family === "A") {
+        transform = primaryStatements === 0 ? "same" : rng.chance(0.22) ? rng.pick(["ending", "extend"] as MelodyTransform[]) : "same";
+        primaryStatements += 1;
+      }
+      emit(section, bar, family, transform);
+    }
+  });
+
+  return { events, motif, rhythm, contour, register };
+}
+
 const SECTION_LABEL: Record<MusicSection["kind"], string> = { intro: "intro", a: "A", b: "B", breakdown: "brk" };
 
 /** Deterministic: the same profile + seed always yields the same composition. */
@@ -1108,7 +1528,14 @@ export function compose(profile: MusicProfile, seed: number): Composition {
     velocity: feel.velocity,
   }, openVoicing, harmonic);
   const bass = buildBass(profile, scale, keyPc, sections, rng, feel, bassId);
-  const melody = buildMelody(profile, scale, keyPc, sections, rng, feel, homeForm && !busyGroove(grooveId));
+  // The previous melody pass still draws, so the drum stream stays where it was.
+  buildMelody(profile, scale, keyPc, sections, rng, feel, homeForm && !busyGroove(grooveId));
+  const sung = renderMelody(profile, scale, keyPc, sections, chords, createRng((seed ^ 0x1b873593) >>> 0), {
+    rng: createRng((seed ^ 0xcc9e2d51) >>> 0),
+    timing: feel.timing,
+    velocity: feel.velocity,
+  });
+  const melody = sung.events;
   const drums = buildDrums(profile, sections, rng, feel, grooveId);
   const tape = { depth: clamp01(profile.tape ?? 0), wowRate: 0.35 + rng.next() * 0.4, flutterRate: 4.5 + rng.next() * 2.5 };
 
@@ -1126,7 +1553,13 @@ export function compose(profile: MusicProfile, seed: number): Composition {
     bridge,
     chordNames,
     form: sections.map((s) => `${SECTION_LABEL[s.kind]}${s.variation ? "'" : ""}${s.bars}`).join(" "),
-    arrangement: { groove: grooveId, bass: bassId, voicing: openVoicing ? "open" : "close", harmonic },
+    arrangement: {
+      groove: grooveId,
+      bass: bassId,
+      voicing: openVoicing ? "open" : "close",
+      harmonic,
+      melody: { motif: sung.motif, rhythm: sung.rhythm, contour: sung.contour, register: sung.register },
+    },
     steps: totalBars * STEPS_PER_BAR,
     swing: clamp(groove.swing ?? 0, 0, 0.3),
     tape,
@@ -1148,5 +1581,5 @@ export function compose(profile: MusicProfile, seed: number): Composition {
 
 export function describeComposition(c: Composition) {
   const bars = c.steps / STEPS_PER_BAR;
-  return `seed=${c.seed} ${c.bpm}bpm ${c.key} ${c.scale} [${c.progression} | B ${c.bridge}] ${c.chordNames.join(" ")} · ${c.arrangement.groove}/${c.arrangement.bass}/${c.arrangement.harmonic} · ${bars} bars: ${c.form}`;
+  return `seed=${c.seed} ${c.bpm}bpm ${c.key} ${c.scale} [${c.progression} | B ${c.bridge}] ${c.chordNames.join(" ")} · ${c.arrangement.groove}/${c.arrangement.bass}/${c.arrangement.harmonic} · ${c.arrangement.melody.motif}/${c.arrangement.melody.register} · ${bars} bars: ${c.form}`;
 }
