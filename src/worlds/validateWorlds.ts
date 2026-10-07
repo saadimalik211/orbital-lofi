@@ -64,15 +64,19 @@ export function validateWorlds(worlds: readonly World[]) {
       }
     }
     const pass = 4 * music.chords.barsPerChord;
-    music.form.forEach((section, i) => {
-      const path = at(`music.form[${i}]`);
-      if (section.bars < 1 || section.bars % pass !== 0) {
-        problems.push(`${path} bars should be a multiple of ${pass} (one progression pass)`);
-      }
-      if (![section.drums, section.bass, section.melody].every(inUnitRange)) {
-        problems.push(`${path} layer levels must be 0–1`);
-      }
-    });
+    const checkForm = (sections: readonly { bars: number; drums: number; bass: number; melody: number }[], label: string) => {
+      sections.forEach((section, i) => {
+        const path = at(`${label}[${i}]`);
+        if (section.bars < 1 || section.bars % pass !== 0) {
+          problems.push(`${path} bars should be a multiple of ${pass} (one progression pass)`);
+        }
+        if (![section.drums, section.bass, section.melody].every(inUnitRange)) {
+          problems.push(`${path} layer levels must be 0–1`);
+        }
+      });
+    };
+    checkForm(music.form, "music.form");
+    music.forms?.forEach((form, i) => checkForm(form, `music.forms[${i}]`));
 
     const aiIds = new Set<string>();
     for (const track of world.aiMusic ?? []) {

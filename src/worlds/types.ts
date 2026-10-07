@@ -31,10 +31,11 @@ export type ProgressionId =
   | "1-4-5-1";
 
 /**
- * One section of the song form. All sections share key, motif and groove; `a` sections share
- * the main progression, `b` uses a second one. Layer levels (0–1) scale the profile `density`,
- * 0 silences the layer. For drums the level also sets what plays: below 0.5 hats only, below
- * 0.75 kick/snare/hats, 0.75+ the full groove, 0.95+ adds pickups and open hats.
+ * One section of the song form. All sections share key, motif and the piece's groove; `a`
+ * sections share the main progression, `b` uses a second one. Layer levels (0–1) scale the
+ * profile `density`, 0 silences the layer. For drums, below 0.5 is hats only, below 0.75 is
+ * the groove's kick and snare, and 0.75+ adds that groove's extra kicks. Open hats and
+ * pickups, when the groove has them, arrive at 0.95 on busier profiles.
  */
 export type MusicSection = {
   kind: "intro" | "a" | "b" | "breakdown";
@@ -115,8 +116,13 @@ export type MusicProfile = {
    * isn't replayed on every press. Playback and world changes still start at the intro.
    */
   nextStartMode?: "intro" | "main";
-  /** Song form, played in order and then looped. */
+  /** Song form, played in order and then looped. Chosen more often than `forms`. */
   form: readonly [MusicSection, ...MusicSection[]];
+  /**
+   * Alternate arrangements in the same length range. Each seed picks one form.
+   * Omit it and every seed uses `form`.
+   */
+  forms?: readonly (readonly [MusicSection, ...MusicSection[]])[];
   groove?: {
     /** Delay of off-beat 16ths, as a fraction of a 16th (0–0.3). Default 0. */
     swing?: number;

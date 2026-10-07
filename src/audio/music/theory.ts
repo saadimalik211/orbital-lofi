@@ -61,9 +61,11 @@ export function voiceChord(
   pitchClasses: readonly number[],
   previous: readonly number[] | null,
   avoid?: readonly number[],
+  preferWide = false,
 ) {
   let best: number[] = [];
   let bestScore = Infinity;
+  const candidates: { notes: number[]; score: number }[] = [];
   for (let inversion = 0; inversion < pitchClasses.length; inversion += 1) {
     const order = [...pitchClasses.slice(inversion), ...pitchClasses.slice(0, inversion)];
     for (let octave = 4; octave <= 6; octave += 1) {
@@ -86,13 +88,23 @@ export function voiceChord(
       const score = previous
         ? notes.reduce((sum, note, i) => sum + Math.abs(note - (previous[i] ?? note)), 0)
         : Math.abs(notes.reduce((a, b) => a + b, 0) / notes.length - VOICING_CENTER);
+      candidates.push({ notes, score });
       if (score < bestScore) {
         bestScore = score;
         best = notes;
       }
     }
   }
-  return best;
+  if (!preferWide || candidates.length === 0) {
+    return best;
+  }
+  // Stay near the closest voicing, then prefer a wider spacing so the piece can sit more open.
+  const window = bestScore + (previous ? 5 : 6);
+  const span = (notes: number[]) => notes[notes.length - 1] - notes[0];
+  return candidates
+    .filter((item) => item.score <= window)
+    .reduce((a, b) => (span(b.notes) > span(a.notes) || (span(b.notes) === span(a.notes) && b.score < a.score) ? b : a))
+    .notes;
 }
 
 /** Human-readable chord symbol (dev logging only), e.g. "Dm7", "Fmaj9", "G7". */

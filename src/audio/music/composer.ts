@@ -48,6 +48,7 @@ export type Composition = {
   bridge: ProgressionId;
   chordNames: string[];
   form: string;
+  arrangement: { groove: GrooveId; bass: BassId; voicing: "close" | "open" };
   steps: number;
   swing: number;
   tape: { depth: number; wowRate: number; flutterRate: number };
@@ -79,13 +80,53 @@ function lateness(feel: Feel, step: number, amount = 1) {
 
 type PlannedSection = MusicSection & { startBar: number; degrees: number[]; next: MusicSection };
 
+export type GrooveId = "sparse" | "halftime" | "kick-light" | "backbeat" | "syncopated";
+export type BassId = "anchor" | "held" | "fifth" | "sync" | "approach" | "octave";
+
+/** Home form is listed twice so the world's main arrangement stays the most common. */
+function pickForm(profile: MusicProfile, rng: Rng) {
+  const forms = [profile.form, ...(profile.forms ?? [])];
+  const roll = rng.int(0, forms.length);
+  const index = roll === 0 ? 0 : roll - 1;
+  return forms[index];
+}
+
+function groovePool(density: number): GrooveId[] {
+  if (density < 0.4) {
+    return ["sparse", "halftime", "kick-light"];
+  }
+  return ["backbeat", "syncopated", "sparse", "kick-light"];
+}
+
+function bassPool(density: number): BassId[] {
+  if (density < 0.28) {
+    return ["anchor", "held"];
+  }
+  if (density < 0.5) {
+    return ["anchor", "fifth", "held"];
+  }
+  return ["fifth", "sync", "approach", "octave"];
+}
+
+const CALM_BASS = new Set<BassId>(["anchor", "held", "fifth", "octave"]);
+
+function busyGroove(groove: GrooveId) {
+  return groove === "backbeat" || groove === "syncopated";
+}
+
 /** Lays out the form: one chord degree per bar, `b` on the bridge progression. */
-function planForm(profile: MusicProfile, main: readonly number[], bridge: readonly number[], rng: Rng) {
+function planForm(
+  profile: MusicProfile,
+  main: readonly number[],
+  bridge: readonly number[],
+  form: readonly MusicSection[],
+  rng: Rng,
+) {
   const per = profile.chords.barsPerChord;
   // Variation sections may end their last pass on a turnaround (5th or 7th degree) instead.
   const turnaround = rng.chance(0.6) ? rng.pick([4, 6]) : null;
   let startBar = 0;
-  return profile.form.map((section, index): PlannedSection => {
+  return form.map((section, index): PlannedSection => {
     const progression = section.kind === "b" ? bridge : main;
     const pass = progression.length * per;
     const bars = Math.max(1, Math.round(section.bars));
@@ -95,7 +136,7 @@ function planForm(profile: MusicProfile, main: readonly number[], bridge: readon
       const swap = section.variation && turnaround !== null && finalPass && slot === progression.length - 1;
       return swap ? turnaround : progression[slot];
     });
-    const planned = { ...section, bars, startBar, degrees, next: profile.form[(index + 1) % profile.form.length] };
+    const planned = { ...section, bars, startBar, degrees, next: form[(index + 1) % form.length] };
     startBar += bars;
     return planned;
   });
@@ -108,6 +149,7 @@ function buildChords(
   sections: PlannedSection[],
   rng: Rng,
   feel: Feel,
+  openVoicing: boolean,
 ) {
   const events: ChordEvent[] = [];
   const pulse = profile.chords.rhythm === "pulse";
@@ -115,15 +157,29 @@ function buildChords(
   const strum = 0.005 + rng.next() * 0.008;
   const softness = clamp01(profile.space.softness);
   let previous: number[] | null = null;
+  let dropFifth = false;
 
   const emit = (
     step: number,
     length: number,
     velocity: number,
     voicing: number[],
-    { spread, rootPc, omitRoot, reshape }: { spread: number; rootPc: number; omitRoot: boolean; reshape: boolean },
+    {
+      spread,
+      rootPc,
+      omitRoot,
+      reshape,
+      dropFifth,
+    }: { spread: number; rootPc: number; omitRoot: boolean; reshape: boolean; dropFifth: boolean },
   ) => {
     let notes = omitRoot ? voicing.filter((note) => note % 12 !== rootPc) : [...voicing];
+    if (dropFifth) {
+      const fifth = (rootPc + 7) % 12;
+      const kept = notes.filter((note) => note % 12 !== fifth);
+      if (kept.length >= 3) {
+        notes = kept;
+      }
+    }
     if (reshape) {
       // Open up a section's last chord without moving any voice: add the root on top, or
       // thin the bottom when there is no room above.
@@ -152,10 +208,12 @@ function buildChords(
       let voicing: number[] = previous ?? [];
       if (changes || !previous) {
         const pcs = chordSemitones(scale, degree, profile.chords.style).map((s) => (keyPc + s) % 12);
-        const nearest = voiceChord(pcs, previous);
+        // The first chord may sit a little more open; later chords follow it by voice leading.
+        const nearest = voiceChord(pcs, previous, undefined, openVoicing && previous === null);
         // Variations open on the next-closest inversion, so a repeat sounds re-voiced.
         const alternate = section.variation && bar === 0 ? voiceChord(pcs, previous, nearest) : [];
         voicing = alternate.length > 0 ? alternate : nearest;
+        dropFifth = openVoicing && voicing.length >= 4 && section.bass > 0 && rng.chance(0.12);
       }
       previous = voicing;
 
@@ -167,9 +225,15 @@ function buildChords(
       const reshape = lastBar && rng.chance(0.4);
 
       if (pulse) {
-        emit(start, 6, 0.85 * soft, voicing, { spread: strum, rootPc, omitRoot: false, reshape: false });
+        emit(start, 6, 0.85 * soft, voicing, { spread: strum, rootPc, omitRoot: false, reshape: false, dropFifth });
         if (!rng.chance(0.1)) {
-          emit(start + pulseStep, 3, 0.55 * soft, voicing, { spread: strum * 0.5, rootPc, omitRoot: omit(0.3), reshape });
+          emit(start + pulseStep, 3, 0.55 * soft, voicing, {
+            spread: strum * 0.5,
+            rootPc,
+            omitRoot: omit(0.3),
+            reshape,
+            dropFifth,
+          });
         }
       } else if (changes) {
         let bars = 1;
@@ -185,6 +249,7 @@ function buildChords(
           rootPc,
           omitRoot: omit(0.15),
           reshape: bar + bars >= section.bars && reshape,
+          dropFifth,
         });
       }
     }
@@ -195,26 +260,26 @@ function buildChords(
 type BassTone = "root" | "fifth" | "third" | "octave" | "approach";
 type BassSlot = { step: number; length: number; tone: BassTone };
 
-const BASS_PATTERNS: readonly BassSlot[][] = [
-  [{ step: 0, length: 12, tone: "root" }],
-  [
-    { step: 0, length: 6, tone: "root" },
+const BASS_ARCHETYPES: Record<BassId, readonly BassSlot[]> = {
+  anchor: [{ step: 0, length: 12, tone: "root" }],
+  held: [{ step: 0, length: 14, tone: "root" }],
+  fifth: [
+    { step: 0, length: 8, tone: "root" },
     { step: 8, length: 6, tone: "fifth" },
   ],
-  [
-    { step: 0, length: 3, tone: "root" },
-    { step: 6, length: 2, tone: "root" },
-    { step: 8, length: 4, tone: "fifth" },
+  sync: [
+    { step: 0, length: 4, tone: "root" },
+    { step: 10, length: 4, tone: "fifth" },
+  ],
+  approach: [
+    { step: 0, length: 10, tone: "root" },
     { step: 14, length: 2, tone: "approach" },
   ],
-  [
-    { step: 0, length: 2, tone: "root" },
-    { step: 3, length: 2, tone: "octave" },
-    { step: 7, length: 2, tone: "third" },
-    { step: 10, length: 3, tone: "fifth" },
-    { step: 14, length: 2, tone: "approach" },
+  octave: [
+    { step: 0, length: 8, tone: "root" },
+    { step: 8, length: 5, tone: "octave" },
   ],
-];
+};
 
 function bassRoot(keyPc: number, scale: readonly number[], degree: number) {
   const midi = 36 + ((keyPc + degreeToSemitones(scale, degree)) % 12);
@@ -228,9 +293,9 @@ function buildBass(
   sections: PlannedSection[],
   rng: Rng,
   feel: Feel,
+  bassId: BassId,
 ) {
   const degreeAt = sections.flatMap((section) => section.degrees);
-  const bias = rng.chance(0.65) ? 0 : -1;
   const events: NoteEvent[] = [];
 
   for (const section of sections) {
@@ -238,12 +303,15 @@ function buildBass(
       continue;
     }
     const level = clamp01(profile.density.bass) * clamp01(section.bass);
-    const pattern =
-      BASS_PATTERNS[clamp(Math.floor(level * BASS_PATTERNS.length) + bias, 0, BASS_PATTERNS.length - 1)];
-    const hasApproach = pattern.some((slot) => slot.tone === "approach");
+    const pattern = BASS_ARCHETYPES[bassId];
     const alteredBar = section.variation ? rng.int(1, Math.max(1, section.bars - 1)) : -1;
+    let skip = false;
 
     for (let bar = 0; bar < section.bars; bar += 1) {
+      if (skip) {
+        skip = false;
+        continue;
+      }
       const absBar = section.startBar + bar;
       const degree = degreeAt[absBar];
       const nextDegree = degreeAt[(absBar + 1) % degreeAt.length];
@@ -251,28 +319,31 @@ function buildBass(
       const triad = chordSemitones(scale, degree, "triad");
       const changes = nextDegree !== degree;
       const lastBar = bar === section.bars - 1;
-
-      const slots = [...pattern];
-      // Sparse patterns still lead into some chord changes with a single approach note.
-      if (!hasApproach && changes && rng.chance(0.25)) {
-        slots.push({ step: 14, length: 2, tone: "approach" });
+      const tailRest = lastBar && section.next.bass <= 0;
+      let slots = pattern.map((slot) => ({ ...slot }));
+      // Quiet sections keep the root of the archetype instead of the whole figure.
+      if (level < 0.22 && slots.length > 1) {
+        const rootSlot = slots.find((slot) => slot.tone === "root") ?? { step: 0, length: 12, tone: "root" as const };
+        slots = [{ ...rootSlot }];
+      }
+      let span = 1;
+      if (bassId === "held" && !changes && bar + 1 < section.bars && !tailRest) {
+        slots = [{ step: 0, length: 30, tone: "root" }];
+        span = 2;
       }
       // One altered note per variation section keeps repeats from being literal copies.
-      if (bar === alteredBar) {
+      if (bar === alteredBar && span === 1 && !tailRest) {
         const fifth = slots.findIndex((slot) => slot.tone === "fifth");
         if (fifth >= 0) {
           slots[fifth] = { ...slots[fifth], tone: "octave" };
-        } else {
+        } else if (slots.length === 1) {
           slots[0] = { ...slots[0], length: Math.min(slots[0].length, 8) };
           slots.push({ step: 10, length: 4, tone: "fifth" });
         }
       }
-      const rest = slots.length > 1 && rng.chance(0.12) ? rng.int(1, slots.length - 1) : -1;
-      // Hand off cleanly when the next section drops the bass.
-      const tailRest = lastBar && section.next.bass <= 0;
 
-      slots.forEach((slot, i) => {
-        if ((slot.tone === "approach" && !changes) || i === rest || (tailRest && slot.step >= 8)) {
+      slots.forEach((slot) => {
+        if ((slot.tone === "approach" && !changes) || (tailRest && slot.step >= 8)) {
           return;
         }
         let midi = root;
@@ -295,24 +366,91 @@ function buildBass(
           nudge: lateness(feel, slot.step, 0.6),
         });
       });
+      skip = span === 2;
     }
   }
   return events;
 }
 
-function buildDrums(profile: MusicProfile, sections: PlannedSection[], rng: Rng, feel: Feel) {
+type GrooveShape = {
+  kicks: number[];
+  extraKicks: number[];
+  snares: number[];
+  hatEvery: number;
+  ghostSnare: number | null;
+  openHat: number | null;
+  pickup: number | null;
+  fill: boolean;
+  snareVelocity: number;
+};
+
+const GROOVES: Record<GrooveId, GrooveShape> = {
+  sparse: {
+    kicks: [0],
+    extraKicks: [8],
+    snares: [8],
+    hatEvery: 4,
+    ghostSnare: null,
+    openHat: null,
+    pickup: null,
+    fill: true,
+    snareVelocity: 0.72,
+  },
+  halftime: {
+    kicks: [0],
+    extraKicks: [],
+    snares: [8],
+    hatEvery: 8,
+    ghostSnare: null,
+    openHat: null,
+    pickup: null,
+    fill: false,
+    snareVelocity: 0.62,
+  },
+  "kick-light": {
+    kicks: [],
+    extraKicks: [],
+    snares: [8],
+    hatEvery: 4,
+    ghostSnare: null,
+    openHat: null,
+    pickup: null,
+    fill: false,
+    snareVelocity: 0.6,
+  },
+  backbeat: {
+    kicks: [0],
+    extraKicks: [8],
+    snares: [4, 12],
+    hatEvery: 2,
+    ghostSnare: 15,
+    openHat: 14,
+    pickup: 13,
+    fill: true,
+    snareVelocity: 0.8,
+  },
+  syncopated: {
+    kicks: [0],
+    extraKicks: [10],
+    snares: [4, 12],
+    hatEvery: 2,
+    ghostSnare: 7,
+    openHat: 6,
+    pickup: null,
+    fill: false,
+    snareVelocity: 0.76,
+  },
+};
+
+function buildDrums(profile: MusicProfile, sections: PlannedSection[], rng: Rng, feel: Feel, groove: GrooveId) {
   const density = clamp01(profile.density.drums);
-  // One groove for the whole piece; sections only decide how much of it plays.
-  const groove = {
-    kickB: rng.pick([8, 10]),
-    kickExtra: rng.chance(density * 0.7) ? rng.pick([3, 7, 11, 14]) : null,
-    ghostSnare: rng.pick([7, 15]),
-    ghostKick: rng.pick([6, 13, 15]),
-    hatPickup: rng.pick([13, 15]),
-    openHat: rng.pick([6, 14]),
-    hatDrop: new Set(Array.from({ length: STEPS_PER_BAR }, (_, s) => s).filter(() => rng.chance(0.12))),
-  };
-  const snares = density < 0.35 ? [8] : [4, 12];
+  const shape = GROOVES[groove];
+  // A couple of holes, chosen once, so a syncopated hat part is not a straight grid.
+  const hatDrop = new Set<number>();
+  if (groove === "syncopated") {
+    hatDrop.add(rng.pick([2, 6]));
+    hatDrop.add(rng.pick([10, 14]));
+  }
   const hits: DrumHit[] = [];
 
   for (const section of sections) {
@@ -322,13 +460,18 @@ function buildDrums(profile: MusicProfile, sections: PlannedSection[], rng: Rng,
     }
     const core = level >= 0.5;
     const full = level >= 0.75;
-    const extras = level >= 0.95;
-    const hatEvery = density >= 0.3 || (extras && density >= 0.2) ? 2 : 4;
+    const extras = level >= 0.95 && density >= 0.4;
     const hatLevel = 0.6 + 0.4 * level;
 
     for (let bar = 0; bar < section.bars; bar += 1) {
       const base = (section.startBar + bar) * STEPS_PER_BAR;
+      const used = new Set<string>();
       const add = (step: number, kind: DrumHit["kind"], velocity: number, tight: boolean) => {
+        const key = `${step}:${kind}`;
+        if (used.has(key)) {
+          return;
+        }
+        used.add(key);
         hits.push({
           step: base + step,
           kind,
@@ -336,30 +479,21 @@ function buildDrums(profile: MusicProfile, sections: PlannedSection[], rng: Rng,
           nudge: lateness(feel, step, tight ? 0.3 : 1),
         });
       };
-      const fill = core && bar === section.bars - 1 && rng.chance(0.6);
+      const fill = core && shape.fill && bar === section.bars - 1 && rng.chance(0.45);
 
       if (core) {
-        const kicks = [0];
-        if (full && density >= 0.2) {
-          kicks.push(groove.kickB);
-        }
-        if (full && groove.kickExtra !== null) {
-          kicks.push(groove.kickExtra);
-        }
-        const skipped = kicks.length > 1 && rng.chance(0.08) ? rng.pick(kicks.slice(1)) : null;
+        const kicks =
+          groove === "kick-light" ? (bar % 2 === 0 ? [0] : []) : [...shape.kicks, ...(full ? shape.extraKicks : [])];
         for (const step of kicks) {
-          if (step !== skipped && !(fill && step > 8)) {
-            add(step, "kick", step === 0 ? 1 : 0.75, true);
+          if (!(fill && step > 8)) {
+            add(step, "kick", step === 0 ? 1 : 0.72, true);
           }
         }
-        if (extras && density > 0.45 && rng.chance(0.2)) {
-          add(groove.ghostKick, "kick", 0.35, true);
+        for (const step of shape.snares) {
+          add(step, "snare", shape.snareVelocity, true);
         }
-        for (const step of snares) {
-          add(step, "snare", 0.8, true);
-        }
-        if (full && density > 0.5) {
-          add(groove.ghostSnare, "snare", 0.22, false);
+        if (full && shape.ghostSnare !== null && density > 0.4) {
+          add(shape.ghostSnare, "snare", 0.22, false);
         }
         if (fill) {
           add(14, "snare", 0.4, false);
@@ -369,15 +503,15 @@ function buildDrums(profile: MusicProfile, sections: PlannedSection[], rng: Rng,
         }
       }
 
-      const toggled = rng.chance(0.08) ? rng.int(1, STEPS_PER_BAR - 1) : -1;
-      const openAt = extras && density >= 0.4 && bar % 2 === 1 ? groove.openHat : -1;
-      const pickupAt = extras && density > 0.5 && bar % 2 === 1 ? groove.hatPickup : -1;
+      const openAt = extras && bar % 2 === 1 ? shape.openHat : null;
+      const pickupAt = extras && bar % 2 === 1 ? shape.pickup : null;
       for (let step = 0; step < STEPS_PER_BAR; step += 1) {
-        const onGrid = step % hatEvery === 0 && !groove.hatDrop.has(step);
         if (step === openAt) {
           add(step, "openHat", 0.5 * hatLevel, false);
-        } else if (onGrid !== (step === toggled)) {
-          add(step, "hat", (step % 4 === 0 ? 0.55 : onGrid ? 0.35 : 0.22) * hatLevel, false);
+          continue;
+        }
+        if (step % shape.hatEvery === 0 && !hatDrop.has(step)) {
+          add(step, "hat", (step % 4 === 0 ? 0.55 : 0.35) * hatLevel, false);
         } else if (step === pickupAt) {
           add(step, "hat", 0.25 * hatLevel, false);
         }
@@ -408,14 +542,54 @@ function makeMotif(density: number, rng: Rng): Motif {
   return { steps, lengths, contour, startTone: rng.pick([0, 1, 2]) };
 }
 
-/** Same rhythm, last interval nudged and the final note held a little longer. */
-function varyMotif(motif: Motif, rng: Rng): Motif {
+type MotifMove = "same" | "ending" | "truncate" | "extend" | "omit" | "shift" | "up";
+
+/** A small change that leaves the rhythm and contour recognizable. */
+function developMotif(motif: Motif, move: MotifMove, endingDir: number): Motif {
   const last = motif.contour.length - 1;
-  return {
-    ...motif,
-    contour: motif.contour.map((c, i) => (i === last && last > 0 ? c + (rng.chance(0.5) ? 1 : -1) : c)),
-    lengths: motif.lengths.map((l, i) => (i === last ? Math.min(l + 2, 8) : l)),
-  };
+  if (move === "ending" && last > 0) {
+    return { ...motif, contour: motif.contour.map((c, i) => (i === last ? c + endingDir : c)) };
+  }
+  if (move === "truncate") {
+    return {
+      ...motif,
+      lengths: motif.lengths.map((length, i) => (i === last ? Math.max(2, length - 2) : length)),
+    };
+  }
+  if (move === "extend") {
+    return {
+      ...motif,
+      lengths: motif.lengths.map((length, i) => (i === last ? Math.min(length + 2, 8) : length)),
+    };
+  }
+  if (move === "omit") {
+    if (motif.steps.length < 3) {
+      return developMotif(motif, "truncate", endingDir);
+    }
+    return {
+      ...motif,
+      steps: motif.steps.slice(0, -1),
+      lengths: motif.lengths.slice(0, -1),
+      contour: motif.contour.slice(0, -1),
+    };
+  }
+  if (move === "shift") {
+    const steps = motif.steps.map((step) => step + 2);
+    return steps[steps.length - 1] <= 12 ? { ...motif, steps } : motif;
+  }
+  if (move === "up") {
+    return { ...motif, startTone: motif.startTone + 1 };
+  }
+  return motif;
+}
+
+function motifCycle(rng: Rng, rich: boolean): MotifMove[] {
+  return [
+    "same",
+    "same",
+    rng.pick(["ending", "extend"]),
+    rich ? rng.pick(["up", "shift", "omit"]) : rng.pick(["truncate", "omit"]),
+  ];
 }
 
 function buildMelody(
@@ -425,6 +599,7 @@ function buildMelody(
   sections: PlannedSection[],
   rng: Rng,
   feel: Feel,
+  rich: boolean,
 ) {
   const peak = clamp01(profile.density.melody);
   const minorThird = scale[2] === 3;
@@ -438,17 +613,14 @@ function buildMelody(
   };
   const toMidi = (degree: number) => 60 + keyPc + degreeToSemitones(scale, degree);
 
-  // One core motif for the piece; `b` answers it from a different chord tone.
+  // One motif for the piece. Repeats develop it; `b` answers from the next chord tone.
   const motif = makeMotif(peak, rng);
-  const answer = { ...motif, startTone: (motif.startTone + 1) % 3 };
-  const variants = new Map([
-    [motif, varyMotif(motif, rng)],
-    [answer, varyMotif(answer, rng)],
-  ]);
+  const cycle = motifCycle(rng, rich);
+  const endingDir = rng.chance(0.5) ? 1 : -1;
   const offsetSeed = rng.int(0, 2);
 
   const events: NoteEvent[] = [];
-  let placed = 0;
+  let phrase = 0;
   for (const section of sections) {
     const level = peak * clamp01(section.melody);
     if (level <= 0) {
@@ -457,17 +629,16 @@ function buildMelody(
     // Sparse: one phrase per 8, 4 or 2 bars, never on a section's first bar.
     const every = level < 0.2 ? 8 : level < 0.4 ? 4 : 2;
     const offset = 1 + (offsetSeed % Math.min(every - 1, 3));
-    let occurrence = 0;
     for (let bar = offset; bar < section.bars; bar += every) {
-      const k = occurrence;
-      occurrence += 1;
-      // Skip the odd phrase (never the first), or push it a 16th or two late.
-      if (placed > 0 && rng.chance(0.12)) {
+      // The motif is stated twice before a repeat may be skipped.
+      if (phrase >= 2 && rng.chance(0.1)) {
         continue;
       }
       const delay = rng.chance(0.15) ? rng.pick([1, 2]) : 0;
-      const base = section.kind === "b" ? answer : motif;
-      const shape = k % 4 === 2 || (section.variation && k === 0) ? variants.get(base)! : base;
+      const move = cycle[phrase % cycle.length];
+      phrase += 1;
+      const developed = developMotif(motif, move, endingDir);
+      const shape = section.kind === "b" ? { ...developed, startTone: developed.startTone + 1 } : developed;
 
       const chordDegree = section.degrees[bar];
       const degrees = shape.contour.map((c) => snap(chordDegree + shape.startTone * 2 + c));
@@ -481,9 +652,10 @@ function buildMelody(
       const low = Math.min(...pitches);
       const high = Math.max(...pitches);
       const mean = pitches.reduce((a, b) => a + b, 0) / pitches.length;
+      const center = section.kind === "b" ? 74 : move === "up" ? 66 : 70;
       const shifts = [-24, -12, 0, 12, 24].filter((s) => high + s <= 79 && low + s >= 60);
       const shift = (shifts.length > 0 ? shifts : [-24]).reduce(
-        (a, b) => (Math.abs(mean + b - 70) < Math.abs(mean + a - 70) ? b : a),
+        (a, b) => (Math.abs(mean + b - center) < Math.abs(mean + a - center) ? b : a),
       );
 
       // Merge repeated pitches into one longer note instead of re-striking.
@@ -497,13 +669,6 @@ function buildMelody(
           notes.push({ step, length: shape.lengths[i], midi });
         }
       });
-      const tail = notes[notes.length - 1];
-      if (rng.chance(0.15)) {
-        tail.length = Math.min(tail.length + 2, 10);
-      } else if (rng.chance(0.1) && tail.length > 3) {
-        tail.length -= 1;
-      }
-
       const barStart = (section.startBar + bar) * STEPS_PER_BAR + delay;
       notes.forEach((note, i) => {
         events.push({
@@ -514,7 +679,6 @@ function buildMelody(
           nudge: lateness(feel, delay + note.step),
         });
       });
-      placed += 1;
     }
   }
   return events;
@@ -536,15 +700,22 @@ export function compose(profile: MusicProfile, seed: number): Composition {
   const key = rng.pick(profile.keys);
   const keyPc = noteIndex(key);
   const scale = SCALES[profile.scale];
+  const chosenForm = pickForm(profile, rng);
+  const homeForm = chosenForm === profile.form;
+  const grooveId = rng.pick(groovePool(profile.density.drums));
+  const basses = bassPool(profile.density.bass);
+  const bassChoices = busyGroove(grooveId) ? basses.filter((id) => CALM_BASS.has(id)) : basses;
+  const bassId = rng.pick(bassChoices.length > 0 ? bassChoices : basses);
+  const openVoicing = homeForm && !busyGroove(grooveId) && rng.chance(0.45);
   const progression = rng.pick(profile.progressions);
   const others = profile.progressions.filter((p) => p !== progression);
   const bridge = others.length > 0 ? rng.pick(others) : progression;
-  const sections = planForm(profile, PROGRESSIONS[progression], PROGRESSIONS[bridge], rng);
+  const sections = planForm(profile, PROGRESSIONS[progression], PROGRESSIONS[bridge], chosenForm, rng);
 
-  const chords = buildChords(profile, scale, keyPc, sections, rng, feel);
-  const bass = buildBass(profile, scale, keyPc, sections, rng, feel);
-  const melody = buildMelody(profile, scale, keyPc, sections, rng, feel);
-  const drums = buildDrums(profile, sections, rng, feel);
+  const chords = buildChords(profile, scale, keyPc, sections, rng, feel, openVoicing);
+  const bass = buildBass(profile, scale, keyPc, sections, rng, feel, bassId);
+  const melody = buildMelody(profile, scale, keyPc, sections, rng, feel, homeForm && !busyGroove(grooveId));
+  const drums = buildDrums(profile, sections, rng, feel, grooveId);
   const tape = { depth: clamp01(profile.tape ?? 0), wowRate: 0.35 + rng.next() * 0.4, flutterRate: 4.5 + rng.next() * 2.5 };
 
   const chordNames = PROGRESSIONS[progression].map((degree) =>
@@ -560,7 +731,8 @@ export function compose(profile: MusicProfile, seed: number): Composition {
     progression,
     bridge,
     chordNames,
-    form: sections.map((s) => SECTION_LABEL[s.kind] + (s.variation ? "'" : "")).join(" "),
+    form: sections.map((s) => `${SECTION_LABEL[s.kind]}${s.variation ? "'" : ""}${s.bars}`).join(" "),
+    arrangement: { groove: grooveId, bass: bassId, voicing: openVoicing ? "open" : "close" },
     steps: totalBars * STEPS_PER_BAR,
     swing: clamp(groove.swing ?? 0, 0, 0.3),
     tape,
@@ -582,5 +754,5 @@ export function compose(profile: MusicProfile, seed: number): Composition {
 
 export function describeComposition(c: Composition) {
   const bars = c.steps / STEPS_PER_BAR;
-  return `seed=${c.seed} ${c.bpm}bpm ${c.key} ${c.scale} [${c.progression} | B ${c.bridge}] ${c.chordNames.join(" ")} · ${bars} bars: ${c.form}`;
+  return `seed=${c.seed} ${c.bpm}bpm ${c.key} ${c.scale} [${c.progression} | B ${c.bridge}] ${c.chordNames.join(" ")} · ${c.arrangement.groove}/${c.arrangement.bass}/${c.arrangement.voicing} · ${bars} bars: ${c.form}`;
 }

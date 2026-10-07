@@ -122,10 +122,13 @@ Shortcuts: `Space` play/pause · `H` hide HUD · `M` mute · `←`/`→` previou
      to generate tracks ahead of time. Optional `aiMusic` lists shipped files under
      `public/worlds/<id>/music/ai/`. Playback uses those files when they are present and
      otherwise stays on the procedural piece. It does not run a model.
-     - `form`: sections share key, groove and the melody motif. `a` sections use the main
+     - `form`: sections share key, groove and the melody motif. Optional `forms` adds a few
+       alternate arrangements; the main `form` is chosen more often. `a` sections use the main
        progression, `b` a second one from `progressions`. Layer levels (0–1) scale `density`;
-       0 silences a layer. Drums below 0.5 are hats only, below 0.75 a basic kick/snare/hat,
-       0.95+ adds pickups and open hats. `variation` re-voices chords and varies the motif;
+       0 silences a layer. Drums below 0.5 are hats only. From 0.5 the section plays the
+       piece's groove; 0.75 adds its extra kicks, and 0.95 adds open hats and pickups when
+       that groove has them. `variation` re-voices the chords; repeated melodic phrases
+       develop the same motif.
        `tone`/`wet` multiply brightness and reverb amount for that section. Keep `bars` a multiple
        of one progression pass (4 × `barsPerChord`).
      - `groove`: `swing` (0–0.3) delays off-beat 16ths; `timingHumanization` (seconds, ≤ 0.03)
