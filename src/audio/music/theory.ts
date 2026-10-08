@@ -85,9 +85,14 @@ export function voiceChord(
       if (avoid && notes.length === avoid.length && notes.every((note, i) => note === avoid[i])) {
         continue;
       }
-      const score = previous
+      let score = previous
         ? notes.reduce((sum, note, i) => sum + Math.abs(note - (previous[i] ?? note)), 0)
         : Math.abs(notes.reduce((a, b) => a + b, 0) / notes.length - VOICING_CENTER);
+      for (let i = 1; i < notes.length; i += 1) {
+        if (notes[i] - notes[i - 1] === 1) {
+          score += 48;
+        }
+      }
       candidates.push({ notes, score });
       if (score < bestScore) {
         bestScore = score;

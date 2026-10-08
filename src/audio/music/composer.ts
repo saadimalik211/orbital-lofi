@@ -54,7 +54,10 @@ export type Composition = {
     voicing: "close" | "open";
     harmonic: HarmonicId;
     melody: { motif: MotifId; rhythm: MelodicRhythm; contour: MelodicContour; register: MelodicRegister };
+    color: ColorPlan;
   };
+  /** Color of each chord event, in the same order as `chords`. */
+  chordColors: ChordColorId[];
   steps: number;
   swing: number;
   tape: { depth: number; wowRate: number; flutterRate: number };
@@ -93,6 +96,15 @@ type PlannedSection = MusicSection & {
 };
 
 export type HarmonicId = "long" | "mixed" | "balanced" | "pulsed";
+export type ChordColorId = "plain" | "add9" | "sus2" | "sus4" | "six" | "six9" | "open" | "relative";
+export type HarmonicCharacter = "floating" | "nocturnal" | "modal";
+export type ColorPlan = {
+  character: HarmonicCharacter;
+  primary: ChordColorId;
+  secondary: ChordColorId;
+  accent: ChordColorId;
+  substitution: "none" | "sus" | "relative";
+};
 export type MotifId = "descend" | "held" | "repeat" | "neighbor" | "leap" | "call" | "pickup";
 export type MelodicRhythm = "long-short" | "short-rest" | "even-resolve" | "sustain" | "sparse" | "sync";
 export type MelodicContour = "down" | "up" | "arch" | "valley" | "repeat" | "leap" | "neighbor";
@@ -378,6 +390,186 @@ function applyHarmonicRhythm(sections: PlannedSection[], profile: MusicProfile, 
   return id;
 }
 
+/** Pulse feels nocturnal. Dorian and aeolian stay modal. Major sustain stays floating. */
+function harmonicCharacter(profile: MusicProfile): HarmonicCharacter {
+  if (profile.chords.rhythm === "pulse") {
+    return "nocturnal";
+  }
+  if (profile.scale === "dorian" || profile.scale === "aeolian") {
+    return "modal";
+  }
+  return "floating";
+}
+
+const COLOR_POOLS: Record<HarmonicCharacter, { primary: ChordColorId[]; secondary: ChordColorId[]; accent: ChordColorId[] }> = {
+  floating: {
+    primary: ["plain", "plain", "plain", "add9", "sus2"],
+    secondary: ["sus2", "add9", "six9", "six"],
+    accent: ["sus2", "six", "add9"],
+  },
+  nocturnal: {
+    primary: ["plain", "plain", "plain", "add9", "six"],
+    secondary: ["add9", "six", "sus4", "plain"],
+    accent: ["six", "sus4", "add9"],
+  },
+  modal: {
+    primary: ["sus2", "sus2", "add9", "plain", "open"],
+    secondary: ["sus4", "add9", "open", "six"],
+    accent: ["sus4", "six", "open"],
+  },
+};
+
+function pickDifferent(rng: Rng, pool: readonly ChordColorId[], avoid: readonly ChordColorId[]) {
+  const options = pool.filter((color) => !avoid.includes(color));
+  return rng.pick(options.length > 0 ? options : pool);
+}
+
+function pickPalette(profile: MusicProfile, rng: Rng, bassId: BassId): ColorPlan {
+  const character = harmonicCharacter(profile);
+  const pool = COLOR_POOLS[character];
+  const primary = rng.pick(pool.primary);
+  const secondary = pickDifferent(rng, pool.secondary, [primary]);
+  const accent = pickDifferent(rng, pool.accent, [primary, secondary]);
+  const chance = character === "nocturnal" ? 0.16 : character === "floating" ? 0.1 : 0.08;
+  let substitution: ColorPlan["substitution"] = "none";
+  if (rng.chance(chance)) {
+    const rootBass = bassId === "anchor" || bassId === "held" || bassId === "octave";
+    substitution = character === "nocturnal" && rootBass && rng.chance(0.45) ? "relative" : "sus";
+  }
+  return { character, primary, secondary, accent, substitution };
+}
+
+function simplerColor(color: ChordColorId): ChordColorId {
+  if (color === "six" || color === "six9" || color === "relative") {
+    return "add9";
+  }
+  return color;
+}
+
+const mod12 = (value: number) => ((value % 12) + 12) % 12;
+
+function degreeInterval(scale: readonly number[], degree: number, step: number) {
+  return mod12(degreeToSemitones(scale, degree + step) - degreeToSemitones(scale, degree));
+}
+
+function ninthClashes(scale: readonly number[], degree: number) {
+  return degreeInterval(scale, degree, 1) === 1;
+}
+
+function thirdIsMinor(scale: readonly number[], degree: number) {
+  return degreeInterval(scale, degree, 2) === 3;
+}
+
+/** Major third plus a minor seventh: a dominant, which floating pieces soften. */
+function isDominant(scale: readonly number[], degree: number) {
+  return degreeInterval(scale, degree, 2) === 4 && degreeInterval(scale, degree, 6) === 10;
+}
+
+function degreePcs(scale: readonly number[], degree: number, steps: readonly number[], keyPc: number) {
+  const pcs: number[] = [];
+  for (const step of steps) {
+    const pc = mod12(keyPc + degreeToSemitones(scale, degree + step));
+    if (!pcs.includes(pc)) {
+      pcs.push(pc);
+    }
+  }
+  return pcs;
+}
+
+function nativePcs(scale: readonly number[], degree: number, style: MusicProfile["chords"]["style"], keyPc: number) {
+  return chordSemitones(scale, degree, style).map((semitone) => mod12(keyPc + semitone));
+}
+
+/** Scale-tone spelling of a color. `relative` moves to the chord that keeps this root as its third. */
+/** A half step above the root is a flat 2, which does not sit as a gentle sus or add9. */
+function hasFlatSecond(rootPc: number, pcs: readonly number[]) {
+  return pcs.some((tone) => tone !== rootPc && mod12(tone - rootPc) === 1);
+}
+
+function spellColor(
+  scale: readonly number[],
+  degree: number,
+  style: MusicProfile["chords"]["style"],
+  color: ChordColorId,
+  keyPc: number,
+) {
+  const spelled = (next: ChordColorId, root: number, pcs: number[]) => ({ color: next, degree: root, pcs });
+  if (color === "plain") {
+    return spelled("plain", degree, nativePcs(scale, degree, style, keyPc));
+  }
+  if (color === "relative") {
+    const other = thirdIsMinor(scale, degree) ? degree - 2 : degree + 5;
+    const pcs = nativePcs(scale, other, "seventh", keyPc);
+    const rootPc = mod12(keyPc + degreeToSemitones(scale, degree));
+    if (!pcs.includes(rootPc)) {
+      return spelled("sus4", degree, degreePcs(scale, degree, [0, 3, 4], keyPc));
+    }
+    return spelled("relative", other, pcs);
+  }
+  if (color === "sus2") {
+    return spelled("sus2", degree, degreePcs(scale, degree, [0, 1, 4], keyPc));
+  }
+  if (color === "sus4") {
+    return spelled("sus4", degree, degreePcs(scale, degree, [0, 3, 4], keyPc));
+  }
+  if (color === "open") {
+    const steps = ninthClashes(scale, degree) ? [0, 4] : [0, 4, 1];
+    return spelled("open", degree, degreePcs(scale, degree, steps, keyPc));
+  }
+  if (color === "six") {
+    return spelled("six", degree, degreePcs(scale, degree, [0, 2, 4, 5], keyPc));
+  }
+  if (color === "six9") {
+    if (ninthClashes(scale, degree)) {
+      return spelled("six", degree, degreePcs(scale, degree, [0, 2, 4, 5], keyPc));
+    }
+    return spelled("six9", degree, degreePcs(scale, degree, [0, 2, 5, 1], keyPc));
+  }
+  if (ninthClashes(scale, degree)) {
+    return spelled("plain", degree, nativePcs(scale, degree, "seventh", keyPc));
+  }
+  return spelled("add9", degree, degreePcs(scale, degree, [0, 2, 4, 1], keyPc));
+}
+
+function guardColor(
+  scale: readonly number[],
+  degree: number,
+  style: MusicProfile["chords"]["style"],
+  color: ChordColorId,
+  keyPc: number,
+) {
+  const spelled = spellColor(scale, degree, style, color, keyPc);
+  const rootPc = mod12(keyPc + degreeToSemitones(scale, spelled.degree));
+  if (!hasFlatSecond(rootPc, spelled.pcs)) {
+    return spelled;
+  }
+  const plain = spellColor(scale, degree, style, "plain", keyPc);
+  const plainRoot = mod12(keyPc + degreeToSemitones(scale, plain.degree));
+  if (!hasFlatSecond(plainRoot, plain.pcs)) {
+    return plain;
+  }
+  return { color: "open" as ChordColorId, degree, pcs: degreePcs(scale, degree, [0, 4], keyPc) };
+}
+
+/** A minor 6th sits a half step above the fifth, so it fights a fifth-bass figure. */
+function fitsBass(color: ChordColorId, bassId: BassId, scale: readonly number[], degree: number) {
+  const playsFifth = bassId === "fifth" || bassId === "sync";
+  if (playsFifth && (color === "six" || color === "six9") && degreeInterval(scale, degree, 5) === 8) {
+    return "add9" as ChordColorId;
+  }
+  return color;
+}
+
+function softenColor(plan: ColorPlan, scale: readonly number[], degree: number, color: ChordColorId) {
+  if (plan.character === "floating" && isDominant(scale, degree) && (color === "plain" || color === "six" || color === "six9")) {
+    return "sus2" as ChordColorId;
+  }
+  if (plan.character === "modal" && isDominant(scale, degree)) {
+    return color === "plain" ? "sus4" : color;
+  }
+  return color;
+}
+
 function pulseThisSection(profile: MusicProfile, id: HarmonicId, role: SectionRole) {
   if (profile.chords.rhythm !== "pulse") {
     return false;
@@ -397,13 +589,44 @@ function renderHarmony(
   feel: Feel,
   openVoicing: boolean,
   id: HarmonicId,
+  colorRng: Rng,
+  bassId: BassId,
 ) {
+  const plan = pickPalette(profile, colorRng, bassId);
   const events: ChordEvent[] = [];
+  const colors: ChordColorId[] = [];
   const pulseStep = harm.pick([10, 11, 14]);
   const strum = 0.005 + harm.next() * 0.008;
   const softness = clamp01(profile.space.softness);
   let previous: number[] | null = null;
+  let previousNative: number[] | null = null;
   let dropFifth = false;
+  let nativeRich = false;
+  let currentColor: ChordColorId = plan.primary;
+  let accentSection = -1;
+  let subLeft = plan.substitution !== "none";
+
+  const paint = (role: SectionRole, degree: number, sectionIndex: number, bar: number, colorDegree: number | null) => {
+    let color: ChordColorId;
+    if (role === "intro" || role === "breakdown") {
+      color = simplerColor(plan.primary);
+    } else if (role === "return") {
+      color = plan.primary;
+    } else if (subLeft && role === "b" && bar === 0) {
+      subLeft = false;
+      color = plan.substitution === "relative" ? "relative" : plan.primary === "sus4" ? "sus2" : "sus4";
+    } else if (colorDegree !== null && degree === colorDegree && role === "a-var" && (accentSection < 0 || accentSection === sectionIndex)) {
+      accentSection = sectionIndex;
+      color = plan.accent;
+    } else if (colorDegree !== null && degree === colorDegree && (role === "a" || role === "b" || role === "a-var")) {
+      color = plan.secondary;
+    } else {
+      color = plan.primary;
+    }
+    return softenColor(plan, scale, degree, fitsBass(color, bassId, scale, degree));
+  };
+
+  const spare = (color: ChordColorId) => color === "sus2" || color === "sus4" || color === "open";
 
   const emit = (
     step: number,
@@ -418,8 +641,9 @@ function renderHarmony(
       dropFifth: drop,
     }: { spread: number; rootPc: number; omitRoot: boolean; reshape: boolean; dropFifth: boolean },
   ) => {
-    let notes = omitRoot ? voicing.filter((note) => note % 12 !== rootPc) : [...voicing];
-    if (drop) {
+    const color = currentColor;
+    let notes = omitRoot && !spare(color) && color !== "relative" ? voicing.filter((note) => note % 12 !== rootPc) : [...voicing];
+    if (drop && !spare(color) && color !== "six9") {
       const fifth = (rootPc + 7) % 12;
       const kept = notes.filter((note) => note % 12 !== fifth);
       if (kept.length >= 3) {
@@ -429,8 +653,14 @@ function renderHarmony(
     if (reshape) {
       const top = notes[notes.length - 1];
       const rootAbove = top + 1 + ((((rootPc - top - 1) % 12) + 12) % 12);
-      notes = rootAbove <= 79 && rootAbove - top <= 7 ? [...notes, rootAbove] : notes.slice(1);
+      const gap = rootAbove - top;
+      if (rootAbove <= 79 && gap <= 7 && gap > 1) {
+        notes = [...notes, rootAbove];
+      } else if (gap !== 1 && notes.length > 3) {
+        notes = notes.slice(1);
+      }
     }
+    colors.push(color);
     events.push({
       step,
       length,
@@ -446,6 +676,8 @@ function renderHarmony(
   for (let index = 0; index < sections.length; index += 1) {
     const section = sections[index];
     const role = sectionRole(section, index, sections);
+    const distinct = collapseDegrees(section.degrees);
+    const colorDegree = distinct.length > 1 ? distinct[1] : null;
     const soft = section.kind === "intro" ? 0.85 : 1;
     const pulse = pulseThisSection(profile, id, role);
     const arpeggioSection = section.kind === "intro" || section.kind === "breakdown";
@@ -465,25 +697,44 @@ function renderHarmony(
       }
       const startChange = bar === 0 || section.degrees[bar] !== section.degrees[bar - 1] || split !== null;
       let voicing: number[] = previous ?? [];
+      let rootPc = mod12(keyPc + degreeToSemitones(scale, degree));
       if (startChange || !previous) {
-        const pcs = chordSemitones(scale, degree, profile.chords.style).map((s) => (keyPc + s) % 12);
-        const nearest = voiceChord(pcs, previous, undefined, openVoicing && previous === null);
-        const alternate = section.variation && bar === 0 ? voiceChord(pcs, previous, nearest) : [];
-        voicing = alternate.length > 0 ? alternate : nearest;
-        dropFifth = openVoicing && voicing.length >= 4 && section.bass > 0 && harm.chance(0.12);
+        const native = chordSemitones(scale, degree, profile.chords.style).map((semitone) => mod12(keyPc + semitone));
+        const nativeNearest: number[] = voiceChord(native, previousNative, undefined, openVoicing && previousNative === null);
+        const nativeAlt: number[] = section.variation && bar === 0 ? voiceChord(native, previousNative, nativeNearest) : [];
+        const nativeVoicing: number[] = nativeAlt.length > 0 ? nativeAlt : nativeNearest;
+        previousNative = nativeVoicing;
+        nativeRich = nativeVoicing.length >= 4;
+        dropFifth = openVoicing && nativeRich && section.bass > 0 && harm.chance(0.12);
+        const spelled = guardColor(scale, degree, profile.chords.style, paint(role, degree, index, bar, colorDegree), keyPc);
+        currentColor = spelled.color;
+        const nearest = voiceChord(spelled.pcs, previous, undefined, openVoicing && previous === null);
+        const alternate = section.variation && bar === 0 ? voiceChord(spelled.pcs, previous, nearest) : [];
+        const rubs = (notes: number[]) => notes.some((note, noteIndex) => noteIndex > 0 && note - notes[noteIndex - 1] === 1);
+        voicing = alternate.length > 0 && !rubs(alternate) ? alternate : nearest;
+        rootPc = mod12(keyPc + degreeToSemitones(scale, spelled.degree));
       }
       previous = voicing;
       const start = (section.startBar + bar) * STEPS_PER_BAR;
-      const rootPc = (keyPc + degreeToSemitones(scale, degree)) % 12;
-      const omit = (chance: number) => voicing.length >= 4 && section.bass > 0 && harm.chance(chance);
+      const omit = (chance: number) => nativeRich && section.bass > 0 && harm.chance(chance);
       const lastBar = bar + run >= section.bars;
       const reshape = lastBar && harm.chance(0.4);
 
       if (split !== null) {
         emit(start, 7, 0.8 * soft, voicing, { spread: strum, rootPc, omitRoot: false, reshape: false, dropFifth });
-        const nextPcs = chordSemitones(scale, split, profile.chords.style).map((s) => (keyPc + s) % 12);
-        const nextVoicing = voiceChord(nextPcs, voicing);
-        const nextRoot = (keyPc + degreeToSemitones(scale, split)) % 12;
+        const nativeNext = chordSemitones(scale, split, profile.chords.style).map((semitone) => mod12(keyPc + semitone));
+        previousNative = voiceChord(nativeNext, previousNative);
+        nativeRich = previousNative.length >= 4;
+        const spelled = guardColor(scale, split, profile.chords.style, paint(role, split, index, bar, colorDegree), keyPc);
+        currentColor = spelled.color;
+        const nextVoicing = voiceChord(spelled.pcs, voicing);
+        if (nextVoicing.some((note, noteIndex) => noteIndex > 0 && note - nextVoicing[noteIndex - 1] === 1)) {
+          const cleaner = voiceChord(spelled.pcs, voicing, nextVoicing);
+          if (cleaner.length > 0 && !cleaner.some((note, noteIndex) => noteIndex > 0 && note - cleaner[noteIndex - 1] === 1)) {
+            nextVoicing.splice(0, nextVoicing.length, ...cleaner);
+          }
+        }
+        const nextRoot = mod12(keyPc + degreeToSemitones(scale, spelled.degree));
         emit(start + 8, 7, 0.72 * soft, nextVoicing, {
           spread: strum,
           rootPc: nextRoot,
@@ -523,7 +774,7 @@ function renderHarmony(
       bar += run;
     }
   }
-  return events;
+  return { events, colors, plan };
 }
 
 function buildChords(
@@ -1522,11 +1773,12 @@ export function compose(profile: MusicProfile, seed: number): Composition {
   buildChords(profile, scale, keyPc, sections, rng, feel, openVoicing);
   const harm = createRng((seed ^ 0x6c8e9cf5) >>> 0);
   const harmonic = applyHarmonicRhythm(sections, profile, harm);
-  const chords = renderHarmony(profile, scale, keyPc, sections, harm, {
+  const harmony = renderHarmony(profile, scale, keyPc, sections, harm, {
     rng: createRng((seed ^ 0x4b1d3c2a) >>> 0),
     timing: feel.timing,
     velocity: feel.velocity,
-  }, openVoicing, harmonic);
+  }, openVoicing, harmonic, createRng((seed ^ 0x3c6ef372) >>> 0), bassId);
+  const chords = harmony.events;
   const bass = buildBass(profile, scale, keyPc, sections, rng, feel, bassId);
   // The previous melody pass still draws, so the drum stream stays where it was.
   buildMelody(profile, scale, keyPc, sections, rng, feel, homeForm && !busyGroove(grooveId));
@@ -1559,7 +1811,9 @@ export function compose(profile: MusicProfile, seed: number): Composition {
       voicing: openVoicing ? "open" : "close",
       harmonic,
       melody: { motif: sung.motif, rhythm: sung.rhythm, contour: sung.contour, register: sung.register },
+      color: harmony.plan,
     },
+    chordColors: harmony.colors,
     steps: totalBars * STEPS_PER_BAR,
     swing: clamp(groove.swing ?? 0, 0, 0.3),
     tape,
@@ -1581,5 +1835,6 @@ export function compose(profile: MusicProfile, seed: number): Composition {
 
 export function describeComposition(c: Composition) {
   const bars = c.steps / STEPS_PER_BAR;
-  return `seed=${c.seed} ${c.bpm}bpm ${c.key} ${c.scale} [${c.progression} | B ${c.bridge}] ${c.chordNames.join(" ")} · ${c.arrangement.groove}/${c.arrangement.bass}/${c.arrangement.harmonic} · ${c.arrangement.melody.motif}/${c.arrangement.melody.register} · ${bars} bars: ${c.form}`;
+  const color = c.arrangement.color;
+  return `seed=${c.seed} ${c.bpm}bpm ${c.key} ${c.scale} [${c.progression} | B ${c.bridge}] ${c.chordNames.join(" ")} · ${c.arrangement.groove}/${c.arrangement.bass}/${c.arrangement.harmonic} · ${color.primary}/${color.secondary}/${color.accent}${color.substitution === "none" ? "" : `+${color.substitution}`} · ${c.arrangement.melody.motif}/${c.arrangement.melody.register} · ${bars} bars: ${c.form}`;
 }
