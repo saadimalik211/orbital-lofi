@@ -230,10 +230,10 @@ const TAPE_BASE_DELAY_S = 0.012;
  * hats → per-hit pan ───────────────────┤
  * bass sine ────────────────────────────┐
  * bass octave → light clip ─────────────┴→ low-pass → soft clip ┤
- * keys → low-pass → soft clip ──────────┤                       ├→ tape → high-pass → compressor → out
- * lead → low-pass → per-note pan ───────┤   reverb ─────────────┘
+ * keys → low-pass → low-shelf → soft clip ┤                     ├→ tone → tape → high-pass → compressor → out
+ * lead → low-pass → per-note pan ───────┤   reverb → trim ──────┘
  * texture (seeded bed) ────────────────┘
- *        reverb: send → pre-delay → early taps + darker tail → high-pass
+ *        reverb: send → pre-delay → early taps + darker tail → high-pass → trim
  */
 type TextureMotion = {
   filterOsc: OscillatorNode;
@@ -291,9 +291,11 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   const earlyGain = gain(0.24);
   const wetHigh = node(() => context.createBiquadFilter(), (f) => {
     f.type = "highpass";
-    f.frequency.value = 140;
+    f.frequency.value = 200;
     f.Q.value = 0.7;
   });
+  // The dry bus is already at 0.7. The return used to skip that fader, so tails sat about 3 dB hot.
+  const wetTrim = gain(0.7);
   const earlyTaps = EARLY_TAPS.map((tap) => {
     const l = node(() => context.createDelay(0.1), (d) => (d.delayTime.value = tap.l));
     const r = node(() => context.createDelay(0.1), (d) => (d.delayTime.value = tap.r));
@@ -317,15 +319,22 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   const bassDrive = gain(1.3);
   const bassClip = clip(1.12);
   const bassTrim = gain(1 / 1.3);
+  const bassLevel = gain(0.85);
   const bassHarmonicDrive = gain(1.75);
   const bassHarmonicClip = clip(1.5);
   const bassHarmonicTrim = gain(1 / 1.75);
   const keysFilter = lowpass(2400);
+  const keysShelf = node(() => context.createBiquadFilter(), (f) => {
+    f.type = "lowshelf";
+    f.frequency.value = 320;
+    f.gain.value = -2.4;
+    f.Q.value = 0.7;
+  });
   const keysDrive = gain(1.6);
   const keysClip = clip(1.25);
   const keysTrim = gain(1 / 1.6);
   const leadFilter = lowpass(3200);
-  const leadPan = gain(1);
+  const leadPan = gain(1.26);
 
   const textureFilter = node(() => context.createBiquadFilter(), (f) => {
     f.type = "lowpass";
@@ -363,11 +372,13 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   bassFilter.connect(bassDrive);
   bassDrive.connect(bassClip);
   bassClip.connect(bassTrim);
-  bassTrim.connect(mix);
+  bassTrim.connect(bassLevel);
+  bassLevel.connect(mix);
   bassHarmonicDrive.connect(bassHarmonicClip);
   bassHarmonicClip.connect(bassHarmonicTrim);
   bassHarmonicTrim.connect(bassFilter);
-  keysFilter.connect(keysDrive);
+  keysFilter.connect(keysShelf);
+  keysShelf.connect(keysDrive);
   keysDrive.connect(keysClip);
   keysClip.connect(keysTrim);
   keysTrim.connect(mix);
@@ -383,7 +394,8 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   earlyGain.connect(wetHigh);
   reverb.connect(reverbDamp);
   reverbDamp.connect(wetHigh);
-  wetHigh.connect(tape);
+  wetHigh.connect(wetTrim);
+  wetTrim.connect(tape);
   textureFilter.connect(textureGain);
   textureGain.connect(mix);
   mix.connect(tone);
@@ -694,11 +706,11 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       flutter.stop();
       for (const n of [
         out, glue, mud, tone, mix, preDelay, reverb, reverbDamp, reverbSend,
-        earlySplit, earlyMerge, earlyLow, earlyGain, wetHigh,
+        earlySplit, earlyMerge, earlyLow, earlyGain, wetHigh, wetTrim,
         ...earlyTaps.flatMap((tap) => [tap.l, tap.r, tap.gl, tap.gr]),
         kickBus, snareBus, hatBus, kickSend, snareSend, hatSend,
-        bassFilter, bassDrive, bassClip, bassTrim, bassHarmonicDrive, bassHarmonicClip, bassHarmonicTrim,
-        keysFilter, keysDrive, keysClip, keysTrim,
+        bassFilter, bassDrive, bassClip, bassTrim, bassLevel, bassHarmonicDrive, bassHarmonicClip, bassHarmonicTrim,
+        keysFilter, keysShelf, keysDrive, keysClip, keysTrim,
         leadFilter, leadPan, textureFilter, textureGain, tape, wow, flutter, wowDepth, flutterDepth,
       ]) {
         n.disconnect();
