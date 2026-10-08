@@ -53,6 +53,18 @@ export type MusicSection = {
 };
 
 /**
+ * How section boundaries are dressed. The composer never reads which world is playing.
+ * `space` leans on holds and dropouts, `pulse` on short fills, `drift` on tails and silence.
+ */
+export type TransitionCharacter = "space" | "pulse" | "drift";
+
+export type MusicTransitions = {
+  /** Chance a section change gets one gesture. Repeated A sections use less. */
+  rate: number;
+  character: TransitionCharacter;
+};
+
+/**
  * Generated room. Decay, damping, and pre-delay shape the early taps and the tail.
  * The engine builds both; there is no sample file.
  */
@@ -133,6 +145,8 @@ export type MusicProfile = {
   };
   /** Tape wow/flutter amount on the music bus (0–1; 0.3 ≈ 1.5 cents). Default 0. */
   tape?: number;
+  /** Section-boundary gestures. Omit it and boundaries stay as the arrangement wrote them. */
+  transitions?: MusicTransitions;
 };
 
 /** A shipped AI recording. Playback loads the file; it never generates one. */

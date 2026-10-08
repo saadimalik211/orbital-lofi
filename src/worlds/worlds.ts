@@ -32,6 +32,7 @@ export const worlds: World[] = [
         bassPresence: 0.34,
         textureAmount: 0.08,
       },
+      transitions: { rate: 0.4, character: "space" },
       nextStartMode: "main",
       form: [
         { kind: "intro", bars: 8, drums: 0, bass: 0, melody: 0, tone: 0.75 },
@@ -196,6 +197,7 @@ export const worlds: World[] = [
         bassPresence: 0.58,
         textureAmount: 0.28,
       },
+      transitions: { rate: 0.48, character: "pulse" },
       nextStartMode: "main",
       form: [
         { kind: "intro", bars: 4, drums: 0, bass: 0, melody: 0, tone: 0.45 },
@@ -344,6 +346,7 @@ export const worlds: World[] = [
         bassPresence: 0.26,
         textureAmount: 0.16,
       },
+      transitions: { rate: 0.36, character: "drift" },
       nextStartMode: "main",
       form: [
         { kind: "intro", bars: 8, drums: 0, bass: 0, melody: 0, tone: 0.7, wet: 1.15 },

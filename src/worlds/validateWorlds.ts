@@ -46,6 +46,13 @@ export function validateWorlds(worlds: readonly World[]) {
     if (!inUnitRange(reverb.amount) || !inUnitRange(reverb.damping)) {
       problems.push(`${at("music.reverb")} amount and damping must be 0–1`);
     }
+    const transitions = music.transitions;
+    if (transitions && !inUnitRange(transitions.rate)) {
+      problems.push(`${at("music.transitions.rate")} must be 0–1`);
+    }
+    if (transitions && !["space", "pulse", "drift"].includes(transitions.character)) {
+      problems.push(`${at("music.transitions.character")} must be space, pulse, or drift`);
+    }
     if (reverb.decay < 0.4 || reverb.decay > 4.5) {
       problems.push(`${at("music.reverb.decay")} must be 0.4–4.5 seconds`);
     }

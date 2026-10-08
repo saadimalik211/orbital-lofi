@@ -8,7 +8,14 @@ import {
   noteIndex,
   voiceChord,
 } from "@/audio/music/theory";
-import type { MusicProfile, MusicSection, NoteName, ProgressionId, ScaleName } from "@/worlds/types";
+import type {
+  MusicProfile,
+  MusicSection,
+  NoteName,
+  ProgressionId,
+  ScaleName,
+  TransitionCharacter,
+} from "@/worlds/types";
 
 export const STEPS_PER_BAR = 16;
 
@@ -35,6 +42,17 @@ export type DrumHit = {
   velocity: number;
   nudge: number;
 };
+/** One gesture at a section boundary. Chosen from its own seed, after the arrangement exists. */
+export type TransitionId =
+  | "hold"
+  | "bass-rest"
+  | "hat-pickup"
+  | "hat-fill"
+  | "ghost"
+  | "drum-rest"
+  | "bass-pickup"
+  | "lead-pickup";
+export type TransitionMark = { step: number; kind: TransitionId };
 /** Where a section starts, with its filter/reverb multipliers for the engine. */
 export type SectionMark = { kind: MusicSection["kind"]; step: number; tone: number; wet: number };
 
@@ -70,6 +88,8 @@ export type Composition = {
   bass: NoteEvent[];
   melody: NoteEvent[];
   drums: DrumHit[];
+  /** Boundary gestures. Empty when the profile has no `transitions` block. */
+  transitions: TransitionMark[];
 };
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
@@ -1741,6 +1761,428 @@ function renderMelody(
   return { events, motif, rhythm, contour, register };
 }
 
+const TRANSITION_WEIGHTS: Record<TransitionCharacter, Record<TransitionId, number>> = {
+  space: {
+    hold: 4,
+    "bass-rest": 3,
+    "hat-pickup": 2,
+    "hat-fill": 0,
+    ghost: 0,
+    "drum-rest": 3,
+    "bass-pickup": 0,
+    "lead-pickup": 1,
+  },
+  pulse: {
+    hold: 1,
+    "bass-rest": 1,
+    "hat-pickup": 2,
+    "hat-fill": 3,
+    ghost: 3,
+    "drum-rest": 2,
+    "bass-pickup": 2,
+    "lead-pickup": 0,
+  },
+  drift: {
+    hold: 3,
+    "bass-rest": 3,
+    "hat-pickup": 0,
+    "hat-fill": 0,
+    ghost: 0,
+    "drum-rest": 3,
+    "bass-pickup": 0,
+    "lead-pickup": 2,
+  },
+};
+
+const TRANSITION_PAIRS: ReadonlyArray<readonly [TransitionId, TransitionId]> = [
+  ["hold", "drum-rest"],
+  ["hold", "bass-rest"],
+  ["bass-rest", "hat-pickup"],
+  ["drum-rest", "lead-pickup"],
+  ["drum-rest", "bass-pickup"],
+  ["hat-fill", "bass-pickup"],
+  ["ghost", "bass-pickup"],
+  ["hold", "lead-pickup"],
+];
+
+type BoundaryKind = "intro" | "var" | "to-b" | "from-b" | "to-break" | "from-break" | "loop" | "other";
+
+type Boundary = {
+  section: PlannedSection;
+  next: PlannedSection;
+  nextIndex: number;
+  barStart: number;
+  edge: number;
+  loop: boolean;
+  major: boolean;
+  kind: BoundaryKind;
+};
+
+function transitionBoundaries(sections: PlannedSection[], totalSteps: number): Boundary[] {
+  return sections.map((section, index) => {
+    const nextIndex = (index + 1) % sections.length;
+    const next = sections[nextIndex];
+    const loop = nextIndex === 0;
+    const edge = loop ? totalSteps : next.startBar * STEPS_PER_BAR;
+    let kind: BoundaryKind = "other";
+    if (loop) {
+      kind = "loop";
+    } else if (section.kind === "intro") {
+      kind = "intro";
+    } else if (section.kind === "breakdown") {
+      kind = "from-break";
+    } else if (next.kind === "breakdown") {
+      kind = "to-break";
+    } else if (next.kind === "b") {
+      kind = "to-b";
+    } else if (section.kind === "b") {
+      kind = "from-b";
+    } else if (Boolean(section.variation) !== Boolean(next.variation)) {
+      kind = "var";
+    }
+    return {
+      section,
+      next,
+      nextIndex,
+      barStart: edge - STEPS_PER_BAR,
+      edge,
+      loop,
+      major: kind !== "var" && kind !== "other",
+      kind,
+    };
+  });
+}
+
+function chordBed(chords: ChordEvent[], from: number, to: number) {
+  return chords.some((chord) => chord.step < to && chord.step + chord.length + 6 > from);
+}
+
+function dropHits(drums: DrumHit[], from: number, to: number, kinds: ReadonlyArray<DrumHit["kind"]>) {
+  let removed = 0;
+  for (const hit of drums) {
+    if (hit.velocity > 0 && hit.step >= from && hit.step < to && kinds.includes(hit.kind)) {
+      hit.velocity = 0;
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function hatAt(drums: DrumHit[], step: number) {
+  return drums.some((hit) => hit.step === step && (hit.kind === "hat" || hit.kind === "openHat"));
+}
+
+function pickTransition(rng: Rng, weights: Record<TransitionId, number>, blocked: ReadonlySet<TransitionId>) {
+  const entries = (Object.entries(weights) as [TransitionId, number][]).filter(
+    ([id, weight]) => weight > 0 && !blocked.has(id),
+  );
+  const total = entries.reduce((sum, [, weight]) => sum + weight, 0);
+  if (total <= 0) {
+    return null;
+  }
+  let roll = rng.next() * total;
+  for (const [id, weight] of entries) {
+    roll -= weight;
+    if (roll < 0) {
+      return id;
+    }
+  }
+  return entries[entries.length - 1][0];
+}
+
+/**
+ * Dresses section boundaries after the arrangement is written. Its random stream is
+ * separate, so form, harmony, melody vocabulary, and the groove stay on their seeds.
+ */
+function applyTransitions(
+  profile: MusicProfile,
+  scale: readonly number[],
+  keyPc: number,
+  sections: PlannedSection[],
+  chords: ChordEvent[],
+  bass: NoteEvent[],
+  melody: NoteEvent[],
+  drums: DrumHit[],
+  rng: Rng,
+): TransitionMark[] {
+  const plan = profile.transitions;
+  if (!plan || plan.rate <= 0 || sections.length < 2) {
+    return [];
+  }
+  const weights = TRANSITION_WEIGHTS[plan.character];
+  const totalSteps = sections.reduce((sum, section) => sum + section.bars, 0) * STEPS_PER_BAR;
+  const marks: TransitionMark[] = [];
+  const vel = (base: number) => Math.min(0.85, base * (0.92 + rng.next() * 0.16));
+
+  const apply = (boundary: Boundary, kind: TransitionId): boolean => {
+    const { section, next, nextIndex, barStart, edge, loop, kind: boundaryKind } = boundary;
+    const arrival = loop ? 0 : next.startBar * STEPS_PER_BAR;
+
+    if (kind === "hold") {
+      let chord: ChordEvent | null = null;
+      for (const candidate of chords) {
+        if (candidate.step < edge && candidate.step + candidate.length >= barStart) {
+          if (!chord || candidate.step >= chord.step) {
+            chord = candidate;
+          }
+        }
+      }
+      if (!chord) {
+        return false;
+      }
+      const extend = Math.min(4, Math.max(0, edge + 4 - (chord.step + chord.length)));
+      if (extend > 0) {
+        chord.length += extend;
+      }
+      chord.release = Math.min(1.8, chord.release + 0.35);
+      return true;
+    }
+
+    if (kind === "bass-rest") {
+      if (!chordBed(chords, barStart + 8, edge)) {
+        return false;
+      }
+      const cut = barStart + 8;
+      let changed = false;
+      for (let i = bass.length - 1; i >= 0; i -= 1) {
+        const note = bass[i];
+        const end = note.step + note.length;
+        if (end <= cut || note.step >= edge) {
+          continue;
+        }
+        if (note.velocity <= 0) {
+          continue;
+        }
+        if (note.step >= cut || cut - note.step < 2) {
+          note.velocity = 0;
+        } else {
+          note.length = cut - note.step;
+        }
+        changed = true;
+      }
+      return changed;
+    }
+
+    if (kind === "hat-pickup" || kind === "hat-fill") {
+      if (next.kind === "breakdown" || (section.drums <= 0 && next.drums <= 0)) {
+        return false;
+      }
+      if (kind === "hat-fill" && (section.drums < 0.5 || drums.some((hit) => hit.kind === "snare" && hit.step >= barStart + 14 && hit.step < edge))) {
+        return false;
+      }
+      const steps = kind === "hat-fill" ? [barStart + 9, barStart + 11] : [barStart + 12, barStart + 14];
+      let added = 0;
+      for (const step of steps) {
+        if (step < 0 || step >= totalSteps || hatAt(drums, step)) {
+          continue;
+        }
+        drums.push({
+          step,
+          kind: "hat",
+          velocity: vel(kind === "hat-fill" ? 0.3 : 0.2),
+          nudge: rng.next() * 0.004,
+        });
+        added += 1;
+      }
+      return added > 0;
+    }
+
+    if (kind === "ghost") {
+      if (next.kind === "breakdown" || section.drums < 0.5) {
+        return false;
+      }
+      const step = barStart + 15;
+      if (drums.some((hit) => hit.kind === "snare" && hit.step >= barStart + 14 && hit.step <= step)) {
+        return false;
+      }
+      drums.push({ step, kind: "snare", velocity: vel(0.22), nudge: rng.next() * 0.004 });
+      return true;
+    }
+
+    if (kind === "drum-rest") {
+      if (boundaryKind === "to-break") {
+        if (!chordBed(chords, barStart, edge)) {
+          return false;
+        }
+        const removed =
+          dropHits(drums, barStart, edge, ["kick"]) + dropHits(drums, barStart + 8, edge, ["hat", "openHat"]);
+        return removed > 0;
+      }
+      const repeated =
+        next.kind === "a" && sections.some((item, index) => index < nextIndex && item.kind === "a");
+      if ((boundaryKind === "from-b" || boundaryKind === "var") && repeated && chordBed(chords, arrival, arrival + 16)) {
+        const muteHats = () => dropHits(drums, arrival, arrival + STEPS_PER_BAR, ["hat", "openHat"]) > 0;
+        const muteLead = () => {
+          let removed = 0;
+          for (const note of melody) {
+            if (note.velocity > 0 && note.step >= arrival && note.step < arrival + STEPS_PER_BAR) {
+              note.velocity = 0;
+              removed += 1;
+            }
+          }
+          return removed > 0;
+        };
+        const thinBass = () => {
+          const inBar = bass.filter(
+            (note) => note.velocity > 0 && note.step >= arrival && note.step < arrival + STEPS_PER_BAR,
+          );
+          if (inBar.length < 2) {
+            return false;
+          }
+          inBar.sort((a, b) => a.step - b.step);
+          for (const note of inBar.slice(1)) {
+            note.velocity = 0;
+          }
+          return true;
+        };
+        const roll = rng.next();
+        if (roll < 0.34) {
+          return muteHats() || muteLead();
+        }
+        if (roll < 0.67) {
+          return muteLead() || muteHats();
+        }
+        return thinBass() || muteHats();
+      }
+      if (!chordBed(chords, barStart + 12, edge)) {
+        return false;
+      }
+      const removed = dropHits(drums, barStart + 12, edge, ["kick"]);
+      if (removed === 0) {
+        return dropHits(drums, barStart + 8, edge, ["hat", "openHat"]) > 0;
+      }
+      const kick = drums.find((hit) => hit.kind === "kick" && hit.step === arrival);
+      if (kick) {
+        kick.velocity = Math.min(1.12, kick.velocity * 1.08);
+      }
+      return true;
+    }
+
+    if (kind === "bass-pickup") {
+      if (next.bass <= 0) {
+        return false;
+      }
+      const overlaps = (step: number, length: number) =>
+        bass.some((note) => note.velocity > 0 && note.step < step + length && note.step + note.length > step);
+      let step = barStart + 12;
+      let length = 4;
+      if (overlaps(step, length)) {
+        step = barStart + 14;
+        length = 2;
+        if (overlaps(step, length)) {
+          return false;
+        }
+      }
+      const degree = next.degrees[0];
+      const current = section.degrees[section.bars - 1];
+      let midi =
+        degree === current
+          ? bassRoot(keyPc, scale, degree)
+          : bassRoot(keyPc, scale, degree) -
+            (degreeToSemitones(scale, degree) - degreeToSemitones(scale, degree - 1));
+      while (midi < 34) {
+        midi += 12;
+      }
+      while (midi > 48) {
+        midi -= 12;
+      }
+      bass.push({ step, length, midi, velocity: vel(0.55), nudge: rng.next() * 0.004 });
+      return true;
+    }
+
+    if (kind === "lead-pickup") {
+      if (next.melody <= 0) {
+        return false;
+      }
+      const chord =
+        chords.find((item) => item.step === arrival) ??
+        chords.find((item) => item.step >= arrival && item.step < arrival + STEPS_PER_BAR);
+      if (!chord) {
+        return false;
+      }
+      let midi = chord.notes[chord.notes.length - 1];
+      while (midi < 60) {
+        midi += 12;
+      }
+      while (midi > 76) {
+        midi -= 12;
+      }
+      const step = barStart + 14;
+      if (melody.some((note) => note.velocity > 0 && note.step < step + 2 && note.step + note.length > step - 1)) {
+        return false;
+      }
+      melody.push({ step, length: 2, midi, velocity: vel(0.42), nudge: rng.next() * 0.004 });
+      return true;
+    }
+
+    return false;
+  };
+
+  const blockedFor = (boundary: Boundary) => {
+    const blocked = new Set<TransitionId>();
+    if (boundary.kind === "to-break") {
+      blocked.add("hat-pickup");
+      blocked.add("hat-fill");
+      blocked.add("ghost");
+      blocked.add("bass-pickup");
+      blocked.add("lead-pickup");
+    }
+    if (boundary.kind === "from-break") {
+      blocked.add("hat-fill");
+      blocked.add("ghost");
+      blocked.add("drum-rest");
+    }
+    if (boundary.kind === "intro" || boundary.kind === "loop") {
+      blocked.add("hat-fill");
+      blocked.add("ghost");
+    }
+    return blocked;
+  };
+
+  for (const boundary of transitionBoundaries(sections, totalSteps)) {
+    const chance = plan.rate * (boundary.major ? 1 : 0.45);
+    if (!rng.chance(chance)) {
+      continue;
+    }
+    const blocked = blockedFor(boundary);
+    let kind = pickTransition(rng, weights, blocked);
+    if (!kind) {
+      continue;
+    }
+    if (!apply(boundary, kind)) {
+      blocked.add(kind);
+      kind = pickTransition(rng, weights, blocked);
+      if (!kind || !apply(boundary, kind)) {
+        continue;
+      }
+    }
+    marks.push({ step: boundary.edge, kind });
+    if (boundary.major && rng.chance(0.16)) {
+      const pairs = new Set<TransitionId>();
+      for (const [left, right] of TRANSITION_PAIRS) {
+        if (left === kind) {
+          pairs.add(right);
+        }
+        if (right === kind) {
+          pairs.add(left);
+        }
+      }
+      blocked.add(kind);
+      for (const id of Object.keys(weights) as TransitionId[]) {
+        if (!pairs.has(id)) {
+          blocked.add(id);
+        }
+      }
+      const second = pickTransition(rng, weights, blocked);
+      if (second && apply(boundary, second)) {
+        marks.push({ step: boundary.edge, kind: second });
+      }
+    }
+  }
+
+  return marks;
+}
+
 const SECTION_LABEL: Record<MusicSection["kind"], string> = { intro: "intro", a: "A", b: "B", breakdown: "brk" };
 
 /** Deterministic: the same profile + seed always yields the same composition. */
@@ -1789,6 +2231,17 @@ export function compose(profile: MusicProfile, seed: number): Composition {
   });
   const melody = sung.events;
   const drums = buildDrums(profile, sections, rng, feel, grooveId);
+  const transitions = applyTransitions(
+    profile,
+    scale,
+    keyPc,
+    sections,
+    chords,
+    bass,
+    melody,
+    drums,
+    createRng((seed ^ 0xa24baed1) >>> 0),
+  );
   const tape = { depth: clamp01(profile.tape ?? 0), wowRate: 0.35 + rng.next() * 0.4, flutterRate: 4.5 + rng.next() * 2.5 };
 
   const chordNames = PROGRESSIONS[progression].map((degree) =>
@@ -1830,6 +2283,7 @@ export function compose(profile: MusicProfile, seed: number): Composition {
     bass,
     melody,
     drums,
+    transitions,
   };
 }
 
