@@ -15,12 +15,67 @@ const TEXTURE_FADE_S = 0.4;
 /** RMS after shaping, so a darker or brighter curve does not change loudness. */
 const TEXTURE_RMS = 0.2;
 
+export type SchedulerHealth = {
+  /** A timer is registered. A discarded browser timer can still look active until `wake`. */
+  active: boolean;
+  /** Audio-clock time of the next 16th to commit. Null while stopped. */
+  nextTime: number | null;
+  step: number | null;
+  /** `currentTime` captured on the last tick. */
+  lastTickTime: number | null;
+  /** Wall time of the last tick, for spotting a timer that stopped firing. */
+  lastTickWall: number | null;
+  /** Latest catch-up that skipped a noticeable stretch, if any. */
+  anomaly: { skipped: number; scheduled: number; rewound: boolean } | null;
+  anomalySerial: number;
+};
+
+export type SchedulerCatchup = {
+  skipped: number;
+  scheduled: number;
+  rewound: boolean;
+};
+
 export type MusicEngine = {
   /** Stops anything playing, then loops `composition`. `fromStep` is a 16th index, 0 = the intro. */
   play: (composition: Composition, fromStep?: number) => void;
   stop: () => void;
+  /** Restart the timer and catch the cursor up. Does not restart the piece. */
+  wake: () => SchedulerCatchup;
+  /**
+   * Development helper. Moves the cursor `seconds` behind the audio clock and
+   * runs one tick, so a late timer can be tested without waiting.
+   */
+  debugStall: (seconds: number) => SchedulerCatchup;
+  health: () => SchedulerHealth;
   dispose: () => void;
 };
+
+/**
+ * Jump the scheduler cursor to the audio clock without walking every missed 16th.
+ * A clock that moved backward snaps the cursor to now and keeps the current step.
+ */
+export function catchUpCursor(
+  nextTime: number,
+  step: number,
+  steps: number,
+  now: number,
+  sixteenth: number,
+) {
+  if (!(sixteenth > 0) || steps <= 0 || !Number.isFinite(now) || !Number.isFinite(nextTime)) {
+    return { nextTime: Number.isFinite(now) ? now : 0, step: 0, skipped: 0, rewound: false };
+  }
+  if (nextTime > now + 0.75) {
+    return { nextTime: now, step, skipped: 0, rewound: true };
+  }
+  if (nextTime >= now) {
+    return { nextTime, step, skipped: 0, rewound: false };
+  }
+  const skipped = Math.ceil((now - nextTime) / sixteenth - 1e-8);
+  const time = nextTime + skipped * sixteenth;
+  const nextStep = (((step + skipped) % steps) + steps) % steps;
+  return { nextTime: time, step: nextStep, skipped, rewound: false };
+}
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 
@@ -437,6 +492,10 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   let slots: ((when: number) => void)[][] = [];
   let step = 0;
   let nextTime = 0;
+  let lastTickTime: number | null = null;
+  let lastTickWall: number | null = null;
+  let anomaly: SchedulerHealth["anomaly"] = null;
+  let anomalySerial = 0;
   let impulseKey = "";
 
   const ensureImpulse = (seconds: number, damping: number) => {
@@ -621,30 +680,51 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     return table;
   };
 
-  const tick = () => {
+  const tick = (): SchedulerCatchup => {
     if (!composition) {
-      return;
+      return { skipped: 0, scheduled: 0, rewound: false };
     }
+    const now = context.currentTime;
     const sixteenth = 60 / composition.bpm / 4;
-    // If the timer stalled (e.g. a busy main thread), skip missed steps instead of bursting them.
-    while (nextTime < context.currentTime) {
-      nextTime += sixteenth;
-      step = (step + 1) % composition.steps;
+    const caught = catchUpCursor(nextTime, step, composition.steps, now, sixteenth);
+    nextTime = caught.nextTime;
+    step = caught.step;
+    if (caught.skipped > 0) {
+      const section = [...composition.sections].reverse().find((item) => item.step <= step) ?? composition.sections[0];
+      applySection(section?.tone ?? 1, section?.wet ?? 1, now, 0);
     }
-    while (nextTime < context.currentTime + LOOKAHEAD_S) {
+    let scheduled = 0;
+    while (nextTime < now + LOOKAHEAD_S) {
       const when = step % 2 === 1 ? nextTime + composition.swing * sixteenth : nextTime;
-      for (const play of slots[step]) {
-        play(when);
+      // A 16th that is already late stays skipped. The lookahead only commits what is due now.
+      if (when >= now - 0.05) {
+        for (const play of slots[step] ?? []) {
+          play(when);
+        }
+        scheduled += 1;
       }
       nextTime += sixteenth;
       step = (step + 1) % composition.steps;
     }
+    lastTickTime = now;
+    lastTickWall = performance.now();
+    if (caught.skipped >= 8 || caught.rewound) {
+      anomalySerial += 1;
+      anomaly = { skipped: caught.skipped, scheduled, rewound: caught.rewound };
+    }
+    return { skipped: caught.skipped, scheduled, rewound: caught.rewound };
+  };
+
+  const armTimer = () => {
+    window.clearInterval(timer);
+    timer = window.setInterval(tick, TICK_MS);
   };
 
   const stop = () => {
     window.clearInterval(timer);
     timer = 0;
     composition = null;
+    anomaly = null;
     const now = context.currentTime;
     haltTexture(now);
     out.gain.cancelScheduledValues(now);
@@ -696,10 +776,37 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       nextTime = now + START_DELAY_S;
       out.gain.setValueAtTime(0, now + STOP_FADE_S + 0.01);
       out.gain.linearRampToValueAtTime(1, now + START_DELAY_S - 0.01);
+      anomaly = null;
       tick();
-      timer = window.setInterval(tick, TICK_MS);
+      armTimer();
     },
     stop,
+    wake() {
+      if (!composition) {
+        return { skipped: 0, scheduled: 0, rewound: false };
+      }
+      const caught = tick();
+      armTimer();
+      return caught;
+    },
+    debugStall(seconds: number) {
+      if (!composition) {
+        return { skipped: 0, scheduled: 0, rewound: false };
+      }
+      nextTime = context.currentTime - Math.max(0, seconds);
+      const caught = tick();
+      armTimer();
+      return caught;
+    },
+    health: () => ({
+      active: timer !== 0,
+      nextTime: composition ? nextTime : null,
+      step: composition ? step : null,
+      lastTickTime,
+      lastTickWall,
+      anomaly,
+      anomalySerial,
+    }),
     dispose() {
       stop();
       wow.stop();

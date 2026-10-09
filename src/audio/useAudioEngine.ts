@@ -47,7 +47,63 @@ type MusicDevHandle = {
   /** Audible music source. Development only. */
   source: () => MusicSource;
   next: () => void;
+  /** Compact playback snapshot. Development only. */
+  audioDebug: () => string;
+  /** Run one scheduler tick as if the timer woke this many seconds late. */
+  simulateStall: (seconds: number) => { skipped: number; scheduled: number; rewound: boolean } | null;
+  /**
+   * One suspend-then-resume of the existing context. Development only.
+   * Does not create a new AudioContext.
+   */
+  outputKick: () => Promise<string>;
 };
+
+/** Safari adds `"interrupted"` for interruptions such as a phone call or a locked screen. */
+type ContextState = AudioContextState | "interrupted";
+
+function contextState(context: BaseAudioContext): ContextState {
+  return context.state as ContextState;
+}
+
+function needsResume(state: ContextState) {
+  return state === "suspended" || state === "interrupted";
+}
+
+function logAudio(event: string, detail?: Record<string, unknown>) {
+  if (!isDev) {
+    return;
+  }
+  if (detail) {
+    console.info(`[orbital-lofi] audio ${event}`, detail);
+    return;
+  }
+  console.info(`[orbital-lofi] audio ${event}`);
+}
+
+const RESUME_WAIT_MS = 1200;
+
+function wait(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+/** `resume()` is started by the caller so a user gesture still counts. This only bounds the wait. */
+async function finishResume(pending: Promise<unknown>, context: AudioContext) {
+  await Promise.race([pending.catch(() => undefined), wait(RESUME_WAIT_MS)]);
+  return contextState(context);
+}
+
+async function resumeContext(context: AudioContext) {
+  return finishResume(context.resume(), context);
+}
+
+/** One-shot WebKit nudge when the context stays `"running"` but its clock has stopped. */
+async function kickContext(context: AudioContext) {
+  await Promise.race([context.suspend().catch(() => undefined), wait(500)]);
+  await wait(80);
+  return resumeContext(context);
+}
 
 declare global {
   interface Window {
@@ -165,16 +221,90 @@ export function useAudioEngine(initialWorld: World) {
   const startTokenRef = useRef(0);
   const ambienceTokenRef = useRef(0);
   const eventTokenRef = useRef(0);
+  const contextsCreatedRef = useRef(0);
+  const contextHookedRef = useRef(false);
+  const recoveringRef = useRef(false);
+  const probeRef = useRef<{ time: number; wall: number } | null>(null);
+  const stallPollsRef = useRef(0);
+  const kickedRef = useRef(false);
+  const resumeAttemptRef = useRef(false);
+  const seenAnomalyRef = useRef(0);
+
+  const recoverPlayback = useCallback(async (reason: string) => {
+    const graph = graphRef.current;
+    if (!graph || !playingRef.current || document.visibilityState === "hidden") {
+      return;
+    }
+    if (recoveringRef.current) {
+      return;
+    }
+    recoveringRef.current = true;
+    try {
+      const before = contextState(graph.context);
+      if (before === "closed") {
+        logAudio(`${reason}: context is closed`);
+        return;
+      }
+      if (needsResume(before)) {
+        const after = await resumeContext(graph.context);
+        logAudio("resume", { reason, from: before, to: after });
+        if (needsResume(contextState(graph.context))) {
+          const kicked = await kickContext(graph.context);
+          logAudio("resume retry via suspend", { reason, to: kicked });
+        }
+      }
+      const caught = graph.engine.wake();
+      if (caught.skipped > 0 || caught.rewound) {
+        logAudio("scheduler resync", { reason, ...caught });
+      }
+      const revived = graph.ai.revive();
+      if (revived === "restarted" || revived === "released") {
+        logAudio("music source revive", { reason, revived });
+      }
+      probeRef.current = { time: graph.context.currentTime, wall: performance.now() };
+    } finally {
+      recoveringRef.current = false;
+    }
+  }, []);
+
+  const onState = useCallback(() => {
+    const graph = graphRef.current;
+    if (!graph) {
+      return;
+    }
+    const state = contextState(graph.context);
+    logAudio("statechange", {
+      context: state,
+      playing: playingRef.current,
+      visible: document.visibilityState,
+      time: Number(graph.context.currentTime.toFixed(2)),
+    });
+    if (playingRef.current && document.visibilityState === "visible" && needsResume(state)) {
+      void recoverPlayback("statechange");
+    }
+  }, [recoverPlayback]);
 
   const ensureGraph = useCallback(async () => {
-    const graph = (graphRef.current ??= createGraph(volumeRef.current));
-    // Called synchronously inside the click/keypress so autoplay policy allows it.
-    const resumed = graph.context.resume().catch(() => {});
-    if (graph.context.state !== "running") {
-      await resumed;
+    if (!graphRef.current) {
+      graphRef.current = createGraph(volumeRef.current);
+      contextsCreatedRef.current += 1;
+    }
+    const graph = graphRef.current;
+    if (!contextHookedRef.current) {
+      graph.context.addEventListener("statechange", onState);
+      contextHookedRef.current = true;
+    }
+    // resume() runs synchronously inside the click/keypress so autoplay policy allows it.
+    const before = contextState(graph.context);
+    if (before !== "running") {
+      const pending = graph.context.resume();
+      if (contextState(graph.context) !== "running") {
+        await finishResume(pending, graph.context);
+      }
+      logAudio("play resume", { from: before, to: contextState(graph.context) });
     }
     return graph;
-  }, []);
+  }, [onState]);
 
   const queuedComposition = useCallback(() => {
     compositionRef.current ??= composeFor(worldRef.current);
@@ -415,7 +545,8 @@ export function useAudioEngine(initialWorld: World) {
         return;
       }
       startingRef.current = false;
-      if (graph.context.state !== "running") {
+      if (contextState(graph.context) !== "running") {
+        logAudio("play blocked", { context: contextState(graph.context) });
         if (isDev) {
           console.warn("[orbital-lofi] Audio is blocked by the browser; press Play again");
         }
@@ -521,6 +652,94 @@ export function useAudioEngine(initialWorld: World) {
     [applyAmbienceLevel],
   );
 
+  const describeAudio = useCallback(() => {
+    const graph = graphRef.current;
+    const health = graph?.engine.health();
+    const now = graph ? graph.context.currentTime : null;
+    const cursor = health?.nextTime ?? null;
+    const drift = now != null && cursor != null ? cursor - now : null;
+    const probe = probeRef.current;
+    let advancing = "unknown";
+    if (graph && probe && performance.now() - probe.wall > 400) {
+      advancing = graph.context.currentTime - probe.time > 0.05 ? "yes" : "no";
+    }
+    const ai = graph?.ai.status();
+    const ambienceVoices = voicesRef.current.size;
+    const fmt = (value: number | null) => (value == null ? "n/a" : value.toFixed(2));
+    return [
+      `Context: ${graph ? contextState(graph.context) : "none"}`,
+      `Context time: ${fmt(now)}`,
+      `Time advancing: ${advancing}`,
+      `Playing: ${playingRef.current}`,
+      `Visible: ${typeof document === "undefined" ? "n/a" : document.visibilityState}`,
+      `Scheduler: ${health?.active ? "active" : "stopped"}`,
+      `Scheduler cursor: ${fmt(cursor)}`,
+      `Cursor drift: ${fmt(drift)}`,
+      `Master gain: ${graph ? graph.master.gain.value.toFixed(2) : "n/a"}`,
+      `Output gain: ${graph ? graph.output.gain.value.toFixed(2) : "n/a"}`,
+      `Music gain: ${graph ? graph.music.gain.value.toFixed(2) : "n/a"}`,
+      `Music source: ${ai?.source ?? "none"}`,
+      `AI: ${ai ? `${ai.source}, ${ai.engaged ? "engaged" : "idle"}, ${ai.voices} voice${ai.voices === 1 ? "" : "s"}` : "none"}`,
+      `Ambience: ${ambienceVoices} voice${ambienceVoices === 1 ? "" : "s"}`,
+      `Contexts created: ${contextsCreatedRef.current}`,
+    ].join("\n");
+  }, []);
+
+  const watchAudio = useCallback(() => {
+    const graph = graphRef.current;
+    if (!graph) {
+      return;
+    }
+    const health = graph.engine.health();
+    if (health.anomaly && health.anomalySerial !== seenAnomalyRef.current) {
+      seenAnomalyRef.current = health.anomalySerial;
+      logAudio("scheduler catch-up", health.anomaly);
+    }
+    const now = graph.context.currentTime;
+    const wall = performance.now();
+    const probe = probeRef.current;
+    const visible = document.visibilityState === "visible";
+    const state = contextState(graph.context);
+    if (playingRef.current && visible && needsResume(state)) {
+      if (!resumeAttemptRef.current) {
+        resumeAttemptRef.current = true;
+        void recoverPlayback("watch");
+      }
+    } else if (state === "running") {
+      resumeAttemptRef.current = false;
+    }
+    if (probe && playingRef.current && visible) {
+      const elapsed = (wall - probe.wall) / 1000;
+      const advanced = now - probe.time;
+      if (state === "running" && elapsed > 3 && advanced < 0.05) {
+        stallPollsRef.current += 1;
+        if (stallPollsRef.current === 1) {
+          logAudio("context time stalled while running", { time: Number(now.toFixed(2)) });
+        }
+        if (stallPollsRef.current >= 2 && !kickedRef.current) {
+          kickedRef.current = true;
+          logAudio("single suspend/resume; context clock had stopped");
+          void kickContext(graph.context).then((next) => {
+            logAudio("kick result", { context: next });
+            if (playingRef.current) {
+              graph.engine.wake();
+            }
+          });
+        }
+      } else if (advanced > 0.2) {
+        stallPollsRef.current = 0;
+        kickedRef.current = false;
+      }
+      const timerStale = health.lastTickWall != null && wall - health.lastTickWall > 3000;
+      const cursorBehind = health.nextTime != null && health.nextTime - now < -1.5;
+      if (state === "running" && (timerStale || cursorBehind)) {
+        const caught = graph.engine.wake();
+        logAudio("scheduler restart", { timerStale, cursorBehind, ...caught });
+      }
+    }
+    probeRef.current = { time: now, wall };
+  }, [recoverPlayback]);
+
   useEffect(() => {
     if (!isDev) {
       return;
@@ -536,6 +755,36 @@ export function useAudioEngine(initialWorld: World) {
       },
       source: () => graphRef.current?.ai.source() ?? "procedural",
       next: nextComposition,
+      audioDebug: () => {
+        const text = describeAudio();
+        console.info(`[orbital-lofi] audioDebug\n${text}`);
+        return text;
+      },
+      simulateStall: (seconds: number) => {
+        const graph = graphRef.current;
+        if (!graph || !playingRef.current) {
+          logAudio("simulateStall skipped; playback is stopped");
+          return null;
+        }
+        const result = graph.engine.debugStall(seconds);
+        logAudio("simulateStall", { seconds, ...result });
+        return result;
+      },
+      outputKick: async () => {
+        const graph = graphRef.current;
+        if (!graph) {
+          return "no context";
+        }
+        const before = contextState(graph.context);
+        const after = before === "running" ? await kickContext(graph.context) : await resumeContext(graph.context);
+        if (playingRef.current) {
+          graph.engine.wake();
+          graph.ai.revive();
+        }
+        const line = `${before} → ${after}`;
+        logAudio("outputKick", { from: before, to: after });
+        return line;
+      },
     };
     window.orbitalMusic = handle;
     return () => {
@@ -543,11 +792,65 @@ export function useAudioEngine(initialWorld: World) {
         delete window.orbitalMusic;
       }
     };
-  }, [nextComposition]);
+  }, [describeAudio, nextComposition]);
 
   useEffect(() => {
+    // Music keeps playing across a hidden tab. Safari may suspend, interrupt, or
+    // leave the context running while timers slow down. Resume only once visible.
+    const onVisibility = () => {
+      const graph = graphRef.current;
+      logAudio("visibilitychange", {
+        state: document.visibilityState,
+        context: graph ? contextState(graph.context) : "none",
+        playing: playingRef.current,
+        time: graph ? Number(graph.context.currentTime.toFixed(2)) : null,
+      });
+      if (document.visibilityState === "visible") {
+        void recoverPlayback("visible");
+      }
+    };
+    const onPageHide = (event: PageTransitionEvent) => {
+      const graph = graphRef.current;
+      logAudio("pagehide", {
+        persisted: event.persisted,
+        context: graph ? contextState(graph.context) : "none",
+        playing: playingRef.current,
+      });
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      logAudio("pageshow", { persisted: event.persisted, playing: playingRef.current });
+      if (document.visibilityState === "visible") {
+        void recoverPlayback("pageshow");
+      }
+    };
+    const onFocus = () => {
+      const graph = graphRef.current;
+      logAudio("focus", {
+        context: graph ? contextState(graph.context) : "none",
+        playing: playingRef.current,
+      });
+    };
+    const onBlur = () => {
+      const graph = graphRef.current;
+      logAudio("blur", {
+        context: graph ? contextState(graph.context) : "none",
+        playing: playingRef.current,
+      });
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    const watchdog = window.setInterval(() => watchAudio(), 5000);
     const voices = voicesRef.current;
     return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+      window.clearInterval(watchdog);
       startTokenRef.current += 1;
       ambienceTokenRef.current += 1;
       startingRef.current = false;
@@ -558,6 +861,10 @@ export function useAudioEngine(initialWorld: World) {
       stopAmbienceVoices(voices);
       stopEventSound();
       const graph = graphRef.current;
+      if (graph && contextHookedRef.current) {
+        graph.context.removeEventListener("statechange", onState);
+        contextHookedRef.current = false;
+      }
       graphRef.current = null;
       graph?.ai.dispose();
       graph?.engine.dispose();
@@ -565,7 +872,7 @@ export function useAudioEngine(initialWorld: World) {
       setIsPlaying(false);
       setStatus("idle");
     };
-  }, [stopEventSound]);
+  }, [onState, recoverPlayback, stopEventSound, watchAudio]);
 
   return {
     isPlaying,

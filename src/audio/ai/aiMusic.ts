@@ -19,6 +19,9 @@ export type AiLibrary = {
   yield: () => void;
   suspend: () => void;
   source: () => MusicSource;
+  /** Restart a track whose buffer died, or confirm the current voice is still attached. */
+  revive: () => "playing" | "restarted" | "released" | "idle";
+  status: () => { source: MusicSource; engaged: boolean; voices: number; loading: boolean };
   dispose: () => void;
 };
 
@@ -365,6 +368,33 @@ export function createAiLibrary(
     },
     source() {
       return phase;
+    },
+    revive() {
+      if (!engaged) {
+        return "idle";
+      }
+      if (phase === "ai") {
+        if (voices.length > 0) {
+          return "playing";
+        }
+        if (current && elapsed() < current.buffer.duration - 0.3) {
+          ramp(procedural.gain, 0, 0, context.currentTime);
+          ramp(aiBus.gain, 1, 0, context.currentTime);
+          startVoice(current.buffer, elapsed(), 0.03);
+          return "restarted";
+        }
+        fadeToProcedural();
+        return "released";
+      }
+      if (voices.length === 0 && aiBus.gain.value > 0.01) {
+        ramp(procedural.gain, 1, 0, context.currentTime);
+        ramp(aiBus.gain, 0, 0, context.currentTime);
+        return "released";
+      }
+      return "playing";
+    },
+    status() {
+      return { source: phase, engaged, voices: voices.length, loading };
     },
     dispose() {
       epoch += 1;
