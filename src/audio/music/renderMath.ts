@@ -75,6 +75,23 @@ export function nextBarHandoff(
   return { wait, audioTime: audioNow + wait, offset };
 }
 
+/**
+ * Wall time divided by the offline audio length.
+ * 0.55 means the render finished in about half the piece's duration.
+ */
+export function renderPace(wallMs: number, audioSeconds: number) {
+  if (!(wallMs > 0) || !(audioSeconds > 0)) {
+    return null;
+  }
+  const wallSeconds = wallMs / 1000;
+  return {
+    /** wall / audio. Lower is faster. */
+    factor: wallSeconds / audioSeconds,
+    /** audio / wall. Higher is faster. */
+    realtime: audioSeconds / wallSeconds,
+  };
+}
+
 /** A finished render may start only when its generation is still the one playing. */
 export function isCurrentGeneration(started: number, current: number) {
   return started === current;

@@ -424,6 +424,15 @@ const TAPE_BASE_DELAY_S = 0.012;
  * texture (seeded bed) ────────────────┘
  *        reverb: send → pre-delay → early taps + darker tail → high-pass → trim
  */
+/** Development timings for one offline build. Live playback leaves this unset. */
+export type OfflineBuildMarks = {
+  graphMs: number;
+  noiseMs: number;
+  impulseMs: number;
+  textureMs: number;
+  scheduleMs: number;
+};
+
 type TextureMotion = {
   filterOsc: OscillatorNode;
   filterDepth: GainNode;
@@ -431,7 +440,12 @@ type TextureMotion = {
   gainDepth: GainNode;
 };
 
-export function createMusicEngine(context: BaseAudioContext, destination: AudioNode): MusicEngine {
+export function createMusicEngine(
+  context: BaseAudioContext,
+  destination: AudioNode,
+  marks?: OfflineBuildMarks,
+): MusicEngine {
+  const graphStarted = marks ? performance.now() : 0;
   const node = <T extends AudioNode>(create: () => T, setup?: (n: T) => void) => {
     const n = create();
     setup?.(n);
@@ -628,6 +642,7 @@ export function createMusicEngine(context: BaseAudioContext, destination: AudioN
       lead: leadFilter,
     },
     register,
+    marks,
   );
 
   let timer = 0;
@@ -726,7 +741,11 @@ export function createMusicEngine(context: BaseAudioContext, destination: AudioN
       return;
     }
     impulseKey = key;
+    const impulseStarted = marks ? performance.now() : 0;
     reverb.buffer = createImpulse(context, rounded, damp);
+    if (marks) {
+      marks.impulseMs += performance.now() - impulseStarted;
+    }
   };
 
   const ensureTexture = (seed: number, brightness: number, softness: number) => {
@@ -735,7 +754,11 @@ export function createMusicEngine(context: BaseAudioContext, destination: AudioN
       return textureBuffer;
     }
     textureKey = key;
+    const textureStarted = marks ? performance.now() : 0;
     textureBuffer = createTextureBed(context, seed, brightness, softness);
+    if (marks) {
+      marks.textureMs += performance.now() - textureStarted;
+    }
     return textureBuffer;
   };
 
@@ -1125,7 +1148,11 @@ export function createMusicEngine(context: BaseAudioContext, destination: AudioN
     flutterDepth.gain.setValueAtTime(next.tape.depth * FLUTTER_DEPTH_S, when);
     startTexture(next.sound.textureAmount, when, next.seed, brightness, softness, steady);
     composition = next;
+    const indexStarted = marks ? performance.now() : 0;
     slots = index(next, 60 / next.bpm / 4);
+    if (marks) {
+      marks.scheduleMs += performance.now() - indexStarted;
+    }
     if (steady) {
       out.gain.cancelScheduledValues(when);
       out.gain.setValueAtTime(1, when);
@@ -1151,6 +1178,10 @@ export function createMusicEngine(context: BaseAudioContext, destination: AudioN
     }
     return events;
   };
+
+  if (marks) {
+    marks.graphMs = Math.max(0, performance.now() - graphStarted - marks.noiseMs);
+  }
 
   return {
     play(next, fromStep = 0) {
@@ -1273,7 +1304,12 @@ export function createMusicEngine(context: BaseAudioContext, destination: AudioN
       applySection(section?.tone ?? 1, section?.wet ?? 1, 0, 0);
       step = 0;
       nextTime = 0;
-      return scheduleCycle(0);
+      const scheduleStarted = marks ? performance.now() : 0;
+      const events = scheduleCycle(0);
+      if (marks) {
+        marks.scheduleMs += performance.now() - scheduleStarted;
+      }
+      return events;
     },
     retire(when) {
       if (!composition || yielded) {

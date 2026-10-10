@@ -64,10 +64,19 @@ export function createInstruments(
   context: BaseAudioContext,
   buses: InstrumentBuses,
   register: RegisterSource,
+  marks?: { noiseMs: number },
 ) {
-  let noise = createNoise(context);
-  let snareNoise = createNoise(context, 0x51a3c2e1);
-  let hatNoise = createNoise(context, 0x9e3779b1);
+  const noiseBuffer = (seed?: number) => {
+    const started = marks ? performance.now() : 0;
+    const buffer = createNoise(context, seed);
+    if (marks) {
+      marks.noiseMs += performance.now() - started;
+    }
+    return buffer;
+  };
+  let noise = noiseBuffer();
+  let snareNoise = noiseBuffer(0x51a3c2e1);
+  let hatNoise = noiseBuffer(0x9e3779b1);
   let noiseSeed = -1;
   let noiseCursor = 0;
   /** 0 = snappy, 1 = slow soft attacks. Set per composition. */
@@ -157,9 +166,9 @@ export function createInstruments(
         noiseSeed = seed;
         // Kick click reads this buffer. It has to follow the piece seed so a live
         // voice and an offline render of that same score share the noise.
-        noise = createNoise(context, seed ^ 0x6a09e667);
-        snareNoise = createNoise(context, seed ^ 0x51a3c2e1);
-        hatNoise = createNoise(context, seed ^ 0x9e3779b1);
+        noise = noiseBuffer(seed ^ 0x6a09e667);
+        snareNoise = noiseBuffer(seed ^ 0x51a3c2e1);
+        hatNoise = noiseBuffer(seed ^ 0x9e3779b1);
       }
     },
 

@@ -5,6 +5,7 @@ import {
   nextBarHandoff,
   pieceSeconds,
   pieceTailSeconds,
+  renderPace,
 } from "./renderMath";
 
 function assert(condition: boolean, message: string) {
@@ -18,6 +19,14 @@ function close(actual: number, expected: number, slop: number, message: string) 
 }
 
 export function runRenderMathTests() {
+  const pace = renderPace(79200, 143.6);
+  if (!pace) {
+    throw new Error("pace exists");
+  }
+  close(pace.factor, 79.2 / 143.6, 1e-9, "render factor is wall time over audio length");
+  close(pace.realtime, 143.6 / 79.2, 1e-9, "realtime rate is the inverse");
+  assert(renderPace(0, 10) == null, "a zero wall time is not a pace");
+
   assert(isCurrentGeneration(4, 4), "matching generation is current");
   assert(!isCurrentGeneration(4, 5), "a newer generation makes the render stale");
 

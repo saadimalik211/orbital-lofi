@@ -30,10 +30,12 @@ import { type NowPlayingInfo } from "@/audio/music/nowPlaying";
 import { randomSeed } from "@/audio/music/random";
 import { isCurrentGeneration, nextBarHandoff, pieceSeconds, pieceTailSeconds } from "@/audio/music/renderMath";
 import {
+  formatRenderProfile,
   offlineRenderSupported,
   renderProceduralPiece,
   startRenderedLoop,
   type LoopVoice,
+  type RenderProfile,
 } from "@/audio/music/renderPiece";
 import type { World, WorldId } from "@/worlds/types";
 import { getWorldById } from "@/worlds/worlds";
@@ -153,6 +155,7 @@ type RenderHold = {
   sampleRate: number | null;
   channels: number | null;
   bytes: number | null;
+  profile: RenderProfile | null;
 };
 
 type RenderRequest = { generation: number; composition: Composition };
@@ -173,6 +176,7 @@ const emptyRender = (generation: number): RenderHold => ({
   sampleRate: null,
   channels: null,
   bytes: null,
+  profile: null,
 });
 
 type Sounding = { worldId: WorldId; composition: Composition };
@@ -186,6 +190,33 @@ function liveSchedulerWanted(graph: AudioGraph, job: RenderHold) {
     return false;
   }
   return true;
+}
+
+function bufferOwnsPlayback(job: RenderHold, now: number | null) {
+  const handed =
+    job.voice != null && job.handoffAt != null && now != null && now >= job.handoffAt - 0.001;
+  if (handed) {
+    return true;
+  }
+  return job.pausedOffset != null && job.buffer != null;
+}
+
+function describeTimeAdvancing(
+  graph: AudioGraph | null,
+  probe: { time: number; wall: number } | null,
+  visibleSince: number | null,
+) {
+  if (!graph || !probe) {
+    return "unknown (no sample yet)";
+  }
+  const elapsed = performance.now() - probe.wall;
+  if (elapsed <= 400) {
+    if (visibleSince != null && performance.now() - visibleSince < 3000) {
+      return "unknown (insufficient samples since visibility return)";
+    }
+    return "unknown (insufficient samples)";
+  }
+  return graph.context.currentTime - probe.time > 0.05 ? "yes" : "no";
 }
 
 function describeRender(graph: AudioGraph | null, job: RenderHold) {
@@ -214,8 +245,62 @@ function describeRender(graph: AudioGraph | null, job: RenderHold) {
     `Live scheduler: ${graph?.engine.health().active ? "active" : "stopped"}`,
     `Rendered source: ${job.voice ? (handed ? "active" : "scheduled") : job.pausedOffset != null ? "paused" : "none"}`,
     `Playback offset: ${seconds(offset)}`,
-    `Looping: ${job.voice || job.pausedOffset != null ? "yes" : "no"}`,
+    `Looping: ${job.voice?.looping || job.pausedOffset != null ? "yes" : "no"}`,
+    ...(job.profile ? formatRenderProfile(job.profile) : []),
   ];
+}
+
+function renderedHealth(
+  graph: AudioGraph,
+  job: RenderHold,
+  now: number,
+  volume: number,
+  transitioning: boolean,
+  nextPending: boolean,
+  previous: { offset: number; wall: number; contextTime: number; generation: number } | null,
+) {
+  const state = contextState(graph.context);
+  if (state !== "running") {
+    return `context is ${state}`;
+  }
+  if (!job.voice) {
+    return job.pausedOffset != null ? "rendered source is paused" : "rendered source is missing";
+  }
+  if (!job.voice.looping) {
+    return "loop is off";
+  }
+  const offset = job.voice.offsetAt(now);
+  if (!Number.isFinite(offset)) {
+    return "playback offset is invalid";
+  }
+  if (volume > 0.001 && graph.master.gain.value < 0.001) {
+    return "master gain is 0";
+  }
+  if (!transitioning && graph.output.gain.value < 0.001) {
+    return "output gain is 0";
+  }
+  if (!nextPending && graph.music.gain.value < 0.001) {
+    return "music gain is 0";
+  }
+  if (graph.ai.status().source === "procedural" && graph.procedural.gain.value < 0.001) {
+    return "procedural gain is 0";
+  }
+  if (
+    previous &&
+    previous.generation === job.generation &&
+    performance.now() - previous.wall > 400 &&
+    now - previous.contextTime > 0.05
+  ) {
+    let delta = offset - previous.offset;
+    const piece = job.pieceSeconds ?? job.buffer?.duration ?? 0;
+    if (piece > 0 && delta < -piece / 2) {
+      delta += piece;
+    }
+    if (delta < 0.02) {
+      return "playback offset is not advancing";
+    }
+  }
+  return "OK";
 }
 
 function createGraph(volume: number): AudioGraph {
@@ -348,6 +433,13 @@ export function useAudioEngine(initialWorld: World) {
   const contextHookedRef = useRef(false);
   const recoveringRef = useRef(false);
   const probeRef = useRef<{ time: number; wall: number } | null>(null);
+  const visibleSinceRef = useRef<number | null>(null);
+  const renderOffsetProbeRef = useRef<{
+    offset: number;
+    wall: number;
+    contextTime: number;
+    generation: number;
+  } | null>(null);
   const stallPollsRef = useRef(0);
   const kickedRef = useRef(false);
   const resumeAttemptRef = useRef(false);
@@ -536,6 +628,7 @@ export function useAudioEngine(initialWorld: World) {
       next.renderMs = previous.renderMs;
       next.scheduledEvents = previous.scheduledEvents;
       next.tailSeconds = previous.tailSeconds;
+      next.profile = previous.profile;
     }
     renderRef.current = next;
   }, []);
@@ -607,6 +700,7 @@ export function useAudioEngine(initialWorld: World) {
             tailSeconds: rendered.tailSeconds,
             renderMs: rendered.renderMs,
             scheduledEvents: rendered.scheduledEvents,
+            profile: rendered.profile,
             sampleRate: rendered.sampleRate,
             channels: rendered.channels,
             bytes: rendered.buffer.length * rendered.buffer.numberOfChannels * 4,
@@ -620,6 +714,7 @@ export function useAudioEngine(initialWorld: World) {
             bytes: renderRef.current.bytes,
             handoffIn: Number(plan.wait.toFixed(2)),
             offset: Number(plan.offset.toFixed(2)),
+            profile: rendered.profile,
           });
         })
         .catch((error: unknown) => {
@@ -995,19 +1090,65 @@ export function useAudioEngine(initialWorld: World) {
 
   const describeAudio = useCallback(() => {
     const graph = graphRef.current;
+    const job = renderRef.current;
     const health = graph?.engine.health();
     const now = graph ? graph.context.currentTime : null;
-    const cursor = health?.nextTime ?? null;
-    const drift = now != null && cursor != null ? cursor - now : null;
-    const probe = probeRef.current;
-    let advancing = "unknown";
-    if (graph && probe && performance.now() - probe.wall > 400) {
-      advancing = graph.context.currentTime - probe.time > 0.05 ? "yes" : "no";
-    }
+    const advancing = describeTimeAdvancing(graph, probeRef.current, visibleSinceRef.current);
     const ai = graph?.ai.status();
     const ambienceVoices = voicesRef.current.size;
-    const layers = graph?.engine.layers();
     const fmt = (value: number | null) => (value == null ? "n/a" : value.toFixed(2));
+    const aiLine = ai
+      ? `${ai.source}, ${ai.engaged ? "engaged" : "idle"}, ${ai.voices} voice${ai.voices === 1 ? "" : "s"}, procedural ${ai.proceduralGain.toFixed(2)}, bus ${ai.aiBusGain.toFixed(2)}`
+      : "none";
+    const header = [
+      `Context: ${graph ? contextState(graph.context) : "none"}`,
+      `Context time: ${fmt(now)}`,
+      `Time advancing: ${advancing}`,
+      `Playing: ${playingRef.current}`,
+      `Visible: ${typeof document === "undefined" ? "n/a" : document.visibilityState}`,
+      `Master gain: ${graph ? graph.master.gain.value.toFixed(2) : "n/a"}`,
+      `Output gain: ${graph ? graph.output.gain.value.toFixed(2) : "n/a"}`,
+      `Music gain: ${graph ? graph.music.gain.value.toFixed(2) : "n/a"}`,
+      `Music source: ${ai?.source ?? "none"}`,
+      `AI: ${aiLine}`,
+      `Ambience: ${ambienceVoices} active`,
+      `Contexts created: ${contextsCreatedRef.current}`,
+    ];
+    if (graph && now != null && bufferOwnsPlayback(job, now)) {
+      const healthLine = renderedHealth(
+        graph,
+        job,
+        now,
+        volumeRef.current,
+        transitioningRef.current,
+        nextTimerRef.current !== 0,
+        renderOffsetProbeRef.current,
+      );
+      const offset = job.voice ? job.voice.offsetAt(now) : job.pausedOffset;
+      if (job.voice && offset != null) {
+        renderOffsetProbeRef.current = {
+          offset,
+          wall: performance.now(),
+          contextTime: now,
+          generation: job.generation,
+        };
+      }
+      const renderLines = describeRender(graph, job).filter(
+        (line) => !line.startsWith("Procedural mode:") && !line.startsWith("Live scheduler:"),
+      );
+      return [
+        ...header,
+        "Procedural mode: rendered",
+        ...renderLines,
+        `Rendered playback health: ${healthLine}`,
+        "Live engine: retired",
+        `Scheduler: ${health?.active ? "stopping" : "stopped"}`,
+        "Live layer diagnostics: inactive (rendered buffer owns playback)",
+      ].join("\n");
+    }
+    const cursor = health?.nextTime ?? null;
+    const drift = now != null && cursor != null ? cursor - now : null;
+    const layers = graph?.engine.layers();
     const ago = (when: number | null) => {
       if (when == null || now == null) {
         return "none";
@@ -1026,31 +1167,20 @@ export function useAudioEngine(initialWorld: World) {
       return `last ${ago(layers.last[layer])} / expected ${yesNo(layers.expected[layer])} / sounding ${yesNo(layers.sounding[layer])}`;
     };
     return [
-      `Context: ${graph ? contextState(graph.context) : "none"}`,
-      `Context time: ${fmt(now)}`,
-      `Time advancing: ${advancing}`,
-      `Playing: ${playingRef.current}`,
-      `Visible: ${typeof document === "undefined" ? "n/a" : document.visibilityState}`,
+      ...header,
       `Scheduler: ${health?.active ? "active" : "stopped"}`,
       `Scheduler cursor: ${fmt(cursor)}`,
       `Cursor drift: ${fmt(drift)}`,
-      `Master gain: ${graph ? graph.master.gain.value.toFixed(2) : "n/a"}`,
-      `Output gain: ${graph ? graph.output.gain.value.toFixed(2) : "n/a"}`,
-      `Music gain: ${graph ? graph.music.gain.value.toFixed(2) : "n/a"}`,
       `Engine gain: ${layers ? layers.buses.out.toFixed(2) : "n/a"}`,
-      `Music source: ${ai?.source ?? "none"}`,
-      `AI: ${ai ? `${ai.source}, ${ai.engaged ? "engaged" : "idle"}, ${ai.voices} voice${ai.voices === 1 ? "" : "s"}, procedural ${ai.proceduralGain.toFixed(2)}, bus ${ai.aiBusGain.toFixed(2)}` : "none"}`,
-      `Contexts created: ${contextsCreatedRef.current}`,
       "Layers:",
       `  texture: ${layers?.texture ?? "off"}`,
-      `  ambience: ${ambienceVoices} active`,
       `  reverb: send ${layers ? layers.reverbSend.toFixed(2) : "n/a"}, return connected`,
       `  chords: ${sustain("chords")}`,
       `  bass: ${sustain("bass")}`,
       `  lead: ${sustain("lead")}`,
       `  drums: last ${ago(layers?.last.drums ?? null)} (kick ${ago(layers?.last.kick ?? null)}, snare ${ago(layers?.last.snare ?? null)}, hats ${ago(layers?.last.hats ?? null)})`,
       `  buses: kick ${layers ? layers.buses.kick.toFixed(2) : "n/a"}, snare ${layers ? layers.buses.snare.toFixed(2) : "n/a"}, hats ${layers ? layers.buses.hats.toFixed(2) : "n/a"}, bass ${layers ? layers.buses.bass.toFixed(2) : "n/a"}, chords ${layers ? layers.buses.chords.toFixed(2) : "n/a"}, lead ${layers ? layers.buses.lead.toFixed(2) : "n/a"}`,
-      ...describeRender(graph, renderRef.current),
+      ...describeRender(graph, job),
     ].join("\n");
   }, []);
 
@@ -1188,6 +1318,7 @@ export function useAudioEngine(initialWorld: World) {
         time: graph ? Number(graph.context.currentTime.toFixed(2)) : null,
       });
       if (document.visibilityState === "visible") {
+        visibleSinceRef.current = performance.now();
         void recoverPlayback("visible");
       }
     };
@@ -1202,6 +1333,7 @@ export function useAudioEngine(initialWorld: World) {
     const onPageShow = (event: PageTransitionEvent) => {
       logAudio("pageshow", { persisted: event.persisted, playing: playingRef.current });
       if (document.visibilityState === "visible") {
+        visibleSinceRef.current = performance.now();
         void recoverPlayback("pageshow");
       }
     };
