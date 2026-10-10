@@ -61,11 +61,11 @@ function envelope(
 }
 
 export function createInstruments(
-  context: AudioContext,
+  context: BaseAudioContext,
   buses: InstrumentBuses,
   register: RegisterSource,
 ) {
-  const noise = createNoise(context);
+  let noise = createNoise(context);
   let snareNoise = createNoise(context, 0x51a3c2e1);
   let hatNoise = createNoise(context, 0x9e3779b1);
   let noiseSeed = -1;
@@ -155,6 +155,9 @@ export function createInstruments(
       snareTune = tune;
       if (seed !== noiseSeed) {
         noiseSeed = seed;
+        // Kick click reads this buffer. It has to follow the piece seed so a live
+        // voice and an offline render of that same score share the noise.
+        noise = createNoise(context, seed ^ 0x6a09e667);
         snareNoise = createNoise(context, seed ^ 0x51a3c2e1);
         hatNoise = createNoise(context, seed ^ 0x9e3779b1);
       }

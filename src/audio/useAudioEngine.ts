@@ -28,6 +28,13 @@ import { describeSilence } from "@/audio/music/silence";
 import { createMusicEngine, type MusicEngine, type SchedulerCatchup } from "@/audio/music/musicEngine";
 import { type NowPlayingInfo } from "@/audio/music/nowPlaying";
 import { randomSeed } from "@/audio/music/random";
+import { isCurrentGeneration, nextBarHandoff, pieceSeconds, pieceTailSeconds } from "@/audio/music/renderMath";
+import {
+  offlineRenderSupported,
+  renderProceduralPiece,
+  startRenderedLoop,
+  type LoopVoice,
+} from "@/audio/music/renderPiece";
 import type { World, WorldId } from "@/worlds/types";
 import { getWorldById } from "@/worlds/worlds";
 
@@ -122,11 +129,94 @@ type AudioGraph = {
   output: GainNode;
   music: GainNode;
   ambience: GainNode;
+  /** Live notes and the rendered buffer both enter here, under the music fade. */
+  procedural: GainNode;
   engine: MusicEngine;
   ai: AiLibrary;
 };
 
+type ProceduralRenderState = "idle" | "rendering" | "ready" | "active" | "failed";
+
+type RenderHold = {
+  generation: number;
+  state: ProceduralRenderState;
+  worldId: WorldId | null;
+  seed: number | null;
+  buffer: AudioBuffer | null;
+  voice: LoopVoice | null;
+  handoffAt: number | null;
+  pausedOffset: number | null;
+  pieceSeconds: number | null;
+  tailSeconds: number | null;
+  renderMs: number | null;
+  scheduledEvents: number | null;
+  sampleRate: number | null;
+  channels: number | null;
+  bytes: number | null;
+};
+
+type RenderRequest = { generation: number; composition: Composition };
+
+const emptyRender = (generation: number): RenderHold => ({
+  generation,
+  state: "idle",
+  worldId: null,
+  seed: null,
+  buffer: null,
+  voice: null,
+  handoffAt: null,
+  pausedOffset: null,
+  pieceSeconds: null,
+  tailSeconds: null,
+  renderMs: null,
+  scheduledEvents: null,
+  sampleRate: null,
+  channels: null,
+  bytes: null,
+});
+
 type Sounding = { worldId: WorldId; composition: Composition };
+
+/** The lookahead timer stays down once the rendered buffer has taken the voice. */
+function liveSchedulerWanted(graph: AudioGraph, job: RenderHold) {
+  if (job.pausedOffset != null) {
+    return false;
+  }
+  if (job.voice && job.handoffAt != null && graph.context.currentTime >= job.handoffAt - 0.03) {
+    return false;
+  }
+  return true;
+}
+
+function describeRender(graph: AudioGraph | null, job: RenderHold) {
+  const now = graph ? graph.context.currentTime : null;
+  const handed =
+    job.voice != null && job.handoffAt != null && now != null && now >= job.handoffAt - 0.001;
+  const state = job.state === "ready" && handed ? "active" : job.state;
+  const offset =
+    job.voice && now != null ? job.voice.offsetAt(now) : job.pausedOffset;
+  const memory =
+    job.bytes == null ? "n/a" : `~${Math.max(1, Math.round(job.bytes / (1024 * 1024)))} MB`;
+  const seconds = (value: number | null) => (value == null ? "n/a" : `${value.toFixed(1)} s`);
+  return [
+    `Procedural mode: ${state === "active" ? "rendered" : "live"}`,
+    `Render state: ${state}`,
+    `Render generation: ${job.generation}`,
+    `Seed: ${job.seed ?? "n/a"}`,
+    `Piece duration: ${seconds(job.pieceSeconds)}`,
+    `Tail: ${seconds(job.tailSeconds)}`,
+    `Rendered buffer: ${job.buffer ? seconds(job.buffer.duration) : "n/a"}`,
+    `Render sample rate: ${job.sampleRate ?? "n/a"}`,
+    `Render channels: ${job.channels ?? "n/a"}`,
+    `Render time: ${job.renderMs == null ? "n/a" : `${(job.renderMs / 1000).toFixed(1)} s`}`,
+    `Scheduled events: ${job.scheduledEvents ?? "n/a"}`,
+    `Buffer memory: ${memory}`,
+    `Live scheduler: ${graph?.engine.health().active ? "active" : "stopped"}`,
+    `Rendered source: ${job.voice ? (handed ? "active" : "scheduled") : job.pausedOffset != null ? "paused" : "none"}`,
+    `Playback offset: ${seconds(offset)}`,
+    `Looping: ${job.voice || job.pausedOffset != null ? "yes" : "no"}`,
+  ];
+}
 
 function createGraph(volume: number): AudioGraph {
   const context = new AudioContext();
@@ -153,6 +243,7 @@ function createGraph(volume: number): AudioGraph {
     output,
     music,
     ambience,
+    procedural,
     engine: createMusicEngine(context, procedural),
     ai: createAiLibrary(context, procedural, aiBus, (message) => {
       if (isDev) {
@@ -262,6 +353,10 @@ export function useAudioEngine(initialWorld: World) {
   const resumeAttemptRef = useRef(false);
   const seenAnomalyRef = useRef(0);
   const fadesRef = useRef<PendingFade[]>([]);
+  const generationRef = useRef(0);
+  const renderRef = useRef<RenderHold>(emptyRender(0));
+  const renderInflightRef = useRef(false);
+  const renderPendingRef = useRef<RenderRequest | null>(null);
 
   const recoverPlayback = useCallback(async (reason: string) => {
     const graph = graphRef.current;
@@ -288,9 +383,11 @@ export function useAudioEngine(initialWorld: World) {
       }
       reconcileFades(fadesRef.current, graph.context.currentTime);
       graph.ai.settle();
-      const caught = graph.engine.wake();
-      if (caught.skipped > 0 || caught.rewound) {
-        logAudio("scheduler resync", { reason, ...caught });
+      if (liveSchedulerWanted(graph, renderRef.current)) {
+        const caught = graph.engine.wake();
+        if (caught.skipped > 0 || caught.rewound) {
+          logAudio("scheduler resync", { reason, ...caught });
+        }
       }
       const revived = graph.ai.revive();
       if (revived === "restarted" || revived === "released") {
@@ -411,6 +508,139 @@ export function useAudioEngine(initialWorld: World) {
     [stopAmbience],
   );
 
+  const abandonRender = useCallback((keepVoice: boolean) => {
+    const previous = renderRef.current;
+    const graph = graphRef.current;
+    const handedOff =
+      previous.voice != null &&
+      previous.handoffAt != null &&
+      graph != null &&
+      graph.context.currentTime >= previous.handoffAt - 0.02;
+    generationRef.current += 1;
+    renderPendingRef.current = null;
+    if (!keepVoice || !handedOff) {
+      previous.voice?.stop();
+    }
+    const next = emptyRender(generationRef.current);
+    if (keepVoice && handedOff) {
+      next.voice = previous.voice;
+      next.handoffAt = previous.handoffAt;
+      next.buffer = previous.buffer;
+      next.state = "active";
+      next.seed = previous.seed;
+      next.worldId = previous.worldId;
+      next.pieceSeconds = previous.pieceSeconds;
+      next.sampleRate = previous.sampleRate;
+      next.channels = previous.channels;
+      next.bytes = previous.bytes;
+      next.renderMs = previous.renderMs;
+      next.scheduledEvents = previous.scheduledEvents;
+      next.tailSeconds = previous.tailSeconds;
+    }
+    renderRef.current = next;
+  }, []);
+
+  const pumpRender = useCallback(() => {
+    const run = () => {
+      if (renderInflightRef.current) {
+        return;
+      }
+      const request = renderPendingRef.current;
+      renderPendingRef.current = null;
+      const graph = graphRef.current;
+      if (!request || !isCurrentGeneration(request.generation, generationRef.current) || !graph) {
+        return;
+      }
+      if (!offlineRenderSupported()) {
+        renderRef.current.state = "failed";
+        logAudio("render unavailable", { reason: "OfflineAudioContext missing" });
+        return;
+      }
+      renderInflightRef.current = true;
+      renderRef.current.state = "rendering";
+      const { generation, composition } = request;
+      void renderProceduralPiece(composition, graph.context.sampleRate, graph.context)
+        .then((rendered) => {
+          const current = graphRef.current;
+          if (!isCurrentGeneration(generation, generationRef.current) || !current || current !== graph || !playingRef.current) {
+            return;
+          }
+          const clock = current.engine.clock();
+          if (!clock) {
+            renderRef.current.state = "failed";
+            logAudio("render failed", { message: "live score was gone before handoff" });
+            return;
+          }
+          const plan = nextBarHandoff(
+            clock.musicalSeconds,
+            clock.pieceSeconds,
+            clock.barSeconds,
+            current.context.currentTime,
+          );
+          const voice = startRenderedLoop(
+            current.context,
+            current.procedural,
+            rendered.buffer,
+            plan.audioTime,
+            plan.offset,
+            clock.pieceSeconds,
+          );
+          if (!isCurrentGeneration(generation, generationRef.current)) {
+            voice.stop();
+            return;
+          }
+          try {
+            current.engine.retire(plan.audioTime + 0.02);
+          } catch (error) {
+            voice.stop();
+            throw error;
+          }
+          renderRef.current.voice?.stop();
+          renderRef.current = {
+            ...renderRef.current,
+            state: "ready",
+            buffer: rendered.buffer,
+            voice,
+            handoffAt: plan.audioTime,
+            pausedOffset: null,
+            pieceSeconds: rendered.pieceSeconds,
+            tailSeconds: rendered.tailSeconds,
+            renderMs: rendered.renderMs,
+            scheduledEvents: rendered.scheduledEvents,
+            sampleRate: rendered.sampleRate,
+            channels: rendered.channels,
+            bytes: rendered.buffer.length * rendered.buffer.numberOfChannels * 4,
+          };
+          logAudio("render ready", {
+            seed: composition.seed,
+            piece: Number(rendered.pieceSeconds.toFixed(1)),
+            tail: Number(rendered.tailSeconds.toFixed(1)),
+            ms: Math.round(rendered.renderMs),
+            rate: rendered.sampleRate,
+            bytes: renderRef.current.bytes,
+            handoffIn: Number(plan.wait.toFixed(2)),
+            offset: Number(plan.offset.toFixed(2)),
+          });
+        })
+        .catch((error: unknown) => {
+          if (!isCurrentGeneration(generation, generationRef.current)) {
+            return;
+          }
+          renderRef.current.state = "failed";
+          renderRef.current.buffer = null;
+          const message = error instanceof Error ? error.message : "render failed";
+          logAudio("render failed", { message });
+        })
+        .finally(() => {
+          renderInflightRef.current = false;
+          if (renderPendingRef.current) {
+            run();
+          }
+        });
+    };
+    run();
+  }, []);
+
   /** Replaces whatever is playing with `composition`, ramping the music stage back up. */
   const startMusic = useCallback(
     (worldId: WorldId, composition: Composition, fadeInSeconds: number, fromStep = 0) => {
@@ -419,13 +649,29 @@ export function useAudioEngine(initialWorld: World) {
         return;
       }
       clearNextTimer();
+      renderRef.current.voice?.stop();
+      generationRef.current += 1;
+      const generation = generationRef.current;
+      renderRef.current = {
+        ...emptyRender(generation),
+        state: "rendering",
+        worldId,
+        seed: composition.seed,
+        pieceSeconds: pieceSeconds(composition.bpm, composition.steps),
+        tailSeconds: pieceTailSeconds({
+          decay: composition.reverb.decay,
+          softness: composition.space.softness,
+        }),
+      };
       graph.engine.play(composition, fromStep);
       soundingRef.current = { worldId, composition };
       setNowPlaying(snapshot(worldId, composition));
       fadeTo(fadesRef.current, graph.music, 1, fadeInSeconds);
       graph.ai.engage(getWorldById(worldId));
+      renderPendingRef.current = { generation, composition };
+      pumpRender();
     },
-    [clearNextTimer],
+    [clearNextTimer, pumpRender],
   );
 
   const startWorldAudio = useCallback(
@@ -548,6 +794,37 @@ export function useAudioEngine(initialWorld: World) {
     [stopEventSound],
   );
 
+  const resumeRendered = useCallback(() => {
+    const graph = graphRef.current;
+    const job = renderRef.current;
+    const composition = compositionRef.current;
+    const world = worldRef.current;
+    if (!graph || !job.buffer || job.pausedOffset == null || !composition) {
+      return false;
+    }
+    if (job.worldId !== world.id || job.seed !== composition.seed) {
+      return false;
+    }
+    const now = graph.context.currentTime;
+    const voice = startRenderedLoop(
+      graph.context,
+      graph.procedural,
+      job.buffer,
+      now,
+      job.pausedOffset,
+      job.pieceSeconds ?? job.buffer.duration,
+    );
+    job.voice = voice;
+    job.handoffAt = now;
+    job.pausedOffset = null;
+    job.state = "active";
+    soundingRef.current = { worldId: world.id, composition };
+    setNowPlaying(snapshot(world.id, composition));
+    graph.ai.engage(world);
+    void startAmbience(world);
+    return true;
+  }, [startAmbience]);
+
   const stopPlayback = useCallback(() => {
     startTokenRef.current += 1;
     startingRef.current = false;
@@ -558,6 +835,22 @@ export function useAudioEngine(initialWorld: World) {
     stopAmbience();
     stopEventSound();
     const graph = graphRef.current;
+    const job = renderRef.current;
+    const handedOff =
+      graph != null &&
+      job.buffer != null &&
+      job.voice != null &&
+      job.handoffAt != null &&
+      graph.context.currentTime >= job.handoffAt - 0.02;
+    if (handedOff && graph) {
+      job.pausedOffset = job.voice?.offsetAt(graph.context.currentTime) ?? 0;
+      job.voice?.stop();
+      job.voice = null;
+      job.handoffAt = null;
+      job.state = "ready";
+    } else {
+      abandonRender(false);
+    }
     if (graph) {
       graph.ai.suspend();
       graph.engine.stop();
@@ -570,7 +863,7 @@ export function useAudioEngine(initialWorld: World) {
       );
     }
     setStatus("idle");
-  }, [clearNextTimer, stopAmbience, stopEventSound]);
+  }, [abandonRender, clearNextTimer, stopAmbience, stopEventSound]);
 
   const togglePlayback = useCallback(async () => {
     // A second press while the context is still resuming cancels the start.
@@ -597,7 +890,9 @@ export function useAudioEngine(initialWorld: World) {
       }
       playingRef.current = true;
       setIsPlaying(true);
-      startWorldAudio(worldRef.current);
+      if (!resumeRendered()) {
+        startWorldAudio(worldRef.current);
+      }
     } catch (error) {
       if (token !== startTokenRef.current) {
         return;
@@ -606,7 +901,7 @@ export function useAudioEngine(initialWorld: World) {
       console.error("[orbital-lofi] Playback failed", error);
       setStatus("error");
     }
-  }, [ensureGraph, startWorldAudio, stopPlayback]);
+  }, [ensureGraph, resumeRendered, startWorldAudio, stopPlayback]);
 
   const beginWorldTransition = useCallback(
     (world: World) => {
@@ -624,10 +919,13 @@ export function useAudioEngine(initialWorld: World) {
       }
       preloadWorldAmbience(graph.context, world);
       if (playingRef.current) {
+        abandonRender(true);
         fadeTo(fadesRef.current, graph.output, 0, TRANSITION_FADE_S);
+      } else {
+        abandonRender(false);
       }
     },
-    [clearNextTimer, stopEventSound],
+    [abandonRender, clearNextTimer, stopEventSound],
   );
 
   const finishWorldTransition = useCallback(
@@ -752,6 +1050,7 @@ export function useAudioEngine(initialWorld: World) {
       `  lead: ${sustain("lead")}`,
       `  drums: last ${ago(layers?.last.drums ?? null)} (kick ${ago(layers?.last.kick ?? null)}, snare ${ago(layers?.last.snare ?? null)}, hats ${ago(layers?.last.hats ?? null)})`,
       `  buses: kick ${layers ? layers.buses.kick.toFixed(2) : "n/a"}, snare ${layers ? layers.buses.snare.toFixed(2) : "n/a"}, hats ${layers ? layers.buses.hats.toFixed(2) : "n/a"}, bass ${layers ? layers.buses.bass.toFixed(2) : "n/a"}, chords ${layers ? layers.buses.chords.toFixed(2) : "n/a"}, lead ${layers ? layers.buses.lead.toFixed(2) : "n/a"}`,
+      ...describeRender(graph, renderRef.current),
     ].join("\n");
   }, []);
 
@@ -794,7 +1093,9 @@ export function useAudioEngine(initialWorld: World) {
             if (playingRef.current) {
               reconcileFades(fadesRef.current, graph.context.currentTime);
               graph.ai.settle();
-              graph.engine.wake();
+              if (liveSchedulerWanted(graph, renderRef.current)) {
+                graph.engine.wake();
+              }
             }
           });
         }
@@ -802,9 +1103,13 @@ export function useAudioEngine(initialWorld: World) {
         stallPollsRef.current = 0;
         kickedRef.current = false;
       }
+      const job = renderRef.current;
+      if (job.state === "ready" && job.handoffAt != null && now >= job.handoffAt) {
+        job.state = "active";
+      }
       const timerStale = health.lastTickWall != null && wall - health.lastTickWall > 3000;
       const cursorBehind = health.nextTime != null && health.nextTime - now < -1.5;
-      if (state === "running" && (timerStale || cursorBehind)) {
+      if (state === "running" && liveSchedulerWanted(graph, job) && (timerStale || cursorBehind)) {
         reconcileFades(fadesRef.current, graph.context.currentTime);
         graph.ai.settle();
         const caught = graph.engine.wake();
@@ -853,7 +1158,9 @@ export function useAudioEngine(initialWorld: World) {
         const after = before === "running" ? await kickContext(graph.context) : await resumeContext(graph.context);
         if (playingRef.current) {
           reconcileFades(fadesRef.current, graph.context.currentTime);
-          graph.engine.wake();
+          if (liveSchedulerWanted(graph, renderRef.current)) {
+            graph.engine.wake();
+          }
           graph.ai.revive();
         }
         const line = `${before} → ${after}`;
@@ -927,6 +1234,10 @@ export function useAudioEngine(initialWorld: World) {
       window.removeEventListener("blur", onBlur);
       window.clearInterval(watchdog);
       startTokenRef.current += 1;
+      generationRef.current += 1;
+      renderPendingRef.current = null;
+      renderRef.current.voice?.stop();
+      renderRef.current = emptyRender(generationRef.current);
       ambienceTokenRef.current += 1;
       startingRef.current = false;
       playingRef.current = false;

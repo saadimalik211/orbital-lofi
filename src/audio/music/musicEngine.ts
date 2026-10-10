@@ -99,6 +99,15 @@ export type MusicEngine = {
    * (music, output, AI buses) can snap if their wall-clock end has passed.
    */
   setRecoveryListener: (listener: (() => void) | null) => void;
+  /** Musical position of the live scheduler. Null while stopped. */
+  clock: () => { pieceSeconds: number; barSeconds: number; musicalSeconds: number } | null;
+  /**
+   * Schedule one full cycle from time 0 and do not arm the lookahead timer.
+   * Live playback and offline rendering both go through this graph.
+   */
+  performScore: (composition: Composition) => number;
+  /** Keep scheduling until `when`, then yield. The last 20 ms fades out. */
+  retire: (when: number) => void;
   dispose: () => void;
 };
 
@@ -422,7 +431,7 @@ type TextureMotion = {
   gainDepth: GainNode;
 };
 
-export function createMusicEngine(context: AudioContext, destination: AudioNode): MusicEngine {
+export function createMusicEngine(context: BaseAudioContext, destination: AudioNode): MusicEngine {
   const node = <T extends AudioNode>(create: () => T, setup?: (n: T) => void) => {
     const n = create();
     setup?.(n);
@@ -588,6 +597,16 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   const active = new Set<AudioScheduledSourceNode>();
   const register: RegisterSource = (source, ...chain) => {
     active.add(source);
+    if (retireAt != null) {
+      try {
+        source.stop(retireAt + 0.02);
+      } catch {
+        // already stopped
+      }
+    }
+    if (!detachOnEnd) {
+      return;
+    }
     source.onended = () => {
       active.delete(source);
       source.disconnect();
@@ -629,6 +648,12 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   let anomaly: SchedulerHealth["anomaly"] = null;
   let anomalySerial = 0;
   let catchListener: (() => void) | null = null;
+  /** Audio time at which the live voice must yield to a rendered buffer. */
+  let retireAt: number | null = null;
+  /** Set once the handoff time has passed, until the next `play`. */
+  let yielded = false;
+  /** Live notes disconnect when they end. An offline render keeps them until the context is discarded. */
+  let detachOnEnd = true;
   /** Wall-clock moment the engine fade to 1 should already have finished. */
   let outSettleAt = 0;
   /** Wall-clock moment the texture fade should already have finished. */
@@ -771,7 +796,7 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     }
   };
 
-  const startMotion = (when: number, seed: number, cutoff: number, level: number) => {
+  const startMotion = (when: number, seed: number, cutoff: number, level: number, steady: boolean) => {
     stopMotion(when);
     const motion = textureMotion(seed);
     const filterOsc = context.createOscillator();
@@ -784,8 +809,12 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     filterDepth.connect(textureFilter.frequency);
     gainOsc.connect(gainDepth);
     gainDepth.connect(textureGain.gain);
-    gainDepth.gain.setValueAtTime(0, when);
-    gainDepth.gain.linearRampToValueAtTime(level * 0.03, when + 0.45);
+    if (steady) {
+      gainDepth.gain.setValueAtTime(level * 0.03, when);
+    } else {
+      gainDepth.gain.setValueAtTime(0, when);
+      gainDepth.gain.linearRampToValueAtTime(level * 0.03, when + 0.45);
+    }
     filterOsc.start(when);
     gainOsc.start(when);
     textureMotionNodes = { filterOsc, filterDepth, gainOsc, gainDepth };
@@ -797,6 +826,7 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     seed: number,
     brightness: number,
     softness: number,
+    steady = false,
   ) => {
     textureGain.gain.cancelScheduledValues(when);
     textureGain.gain.setValueAtTime(0, when);
@@ -809,19 +839,25 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     // Sit above the curve already baked into the buffer so the two filters do not stack.
     const openCutoff = tone.cutoff * 1.25;
     textureFilter.frequency.cancelScheduledValues(when);
-    textureFilter.frequency.setValueAtTime(textureFilter.frequency.value, when);
-    textureFilter.frequency.setTargetAtTime(openCutoff, when, 0.2);
-    textureGain.gain.linearRampToValueAtTime(level, when + 0.45);
     textureLevel = level;
     textureCutoff = openCutoff;
-    textureSettleAt = performance.now() + 450;
+    if (steady) {
+      textureFilter.frequency.setValueAtTime(openCutoff, when);
+      textureGain.gain.setValueAtTime(level, when);
+      textureSettleAt = 0;
+    } else {
+      textureFilter.frequency.setValueAtTime(textureFilter.frequency.value, when);
+      textureFilter.frequency.setTargetAtTime(openCutoff, when, 0.2);
+      textureGain.gain.linearRampToValueAtTime(level, when + 0.45);
+      textureSettleAt = performance.now() + 450;
+    }
     const source = context.createBufferSource();
     source.buffer = ensureTexture(seed, brightness, softness);
     source.loop = true;
     source.connect(textureFilter);
     source.start(when);
     textureSource = source;
-    startMotion(when, seed, openCutoff, level);
+    startMotion(when, seed, openCutoff, level, steady);
   };
 
   /** Filter/reverb targets for the composition's base `space`, scaled per section. */
@@ -938,6 +974,13 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       return idleCatch();
     }
     const now = context.currentTime;
+    if (retireAt != null && now >= retireAt - 0.005) {
+      window.clearInterval(timer);
+      timer = 0;
+      retireAt = null;
+      yielded = true;
+      return idleCatch();
+    }
     settleBeds(now);
     const sixteenth = 60 / composition.bpm / 4;
     const fromStep = step;
@@ -991,7 +1034,7 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     const landedCursor = nextTime;
     let scheduled = 0;
     let scheduledEvents = 0;
-    while (nextTime < now + LOOKAHEAD_S) {
+    while (nextTime < now + LOOKAHEAD_S && (retireAt == null || nextTime < retireAt)) {
       const when = step % 2 === 1 ? nextTime + composition.swing * sixteenth : nextTime;
       // A 16th that is already late stays skipped. The lookahead only commits what is due now.
       if (when >= now - 0.05) {
@@ -1035,6 +1078,9 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   const stop = () => {
     window.clearInterval(timer);
     timer = 0;
+    retireAt = null;
+    yielded = false;
+    detachOnEnd = true;
     composition = null;
     anomaly = null;
     outSettleAt = 0;
@@ -1054,39 +1100,66 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     }
   };
 
+  /** Shared by live `play` and offline `performScore`. Does not start the timer. */
+  const mountPiece = (next: Composition, when: number, steady: boolean) => {
+    ensureTexture(next.seed, next.space.brightness, next.space.softness);
+    const { brightness, softness } = next.space;
+    const { amount, decay, damping, preDelay: delay = 0 } = next.reverb;
+    base = { tone: 1800 + brightness * 7000, keys: 900 + brightness * 3200, wet: 0.05 + amount * 0.55 };
+    const damp = Math.min(1, Math.max(0, damping));
+    ensureImpulse(decay, damp);
+    preDelay.delayTime.setValueAtTime(Math.min(0.08, Math.max(0, delay)), when);
+    const room = 0.84 + Math.min(1, decay / 4.5) * 0.38;
+    earlyTaps.forEach((tap, i) => {
+      tap.l.delayTime.setValueAtTime(Math.min(0.08, EARLY_TAPS[i].l * room), when);
+      tap.r.delayTime.setValueAtTime(Math.min(0.08, EARLY_TAPS[i].r * room), when);
+    });
+    earlyLow.frequency.setValueAtTime(2800 + (1 - damp) * 2400, when);
+    reverbDamp.frequency.setValueAtTime(2400 + (1 - damp) * 5000, when);
+    const tune = (createRng(next.seed ^ 0x9e3779b9).next() - 0.5) * 12;
+    instruments.setSound(next.sound, softness, tune, next.seed);
+    leadFilter.frequency.setValueAtTime(1600 + brightness * 3600, when);
+    wow.frequency.setValueAtTime(next.tape.wowRate, when);
+    flutter.frequency.setValueAtTime(next.tape.flutterRate, when);
+    wowDepth.gain.setValueAtTime(next.tape.depth * WOW_DEPTH_S, when);
+    flutterDepth.gain.setValueAtTime(next.tape.depth * FLUTTER_DEPTH_S, when);
+    startTexture(next.sound.textureAmount, when, next.seed, brightness, softness, steady);
+    composition = next;
+    slots = index(next, 60 / next.bpm / 4);
+    if (steady) {
+      out.gain.cancelScheduledValues(when);
+      out.gain.setValueAtTime(1, when);
+    }
+  };
+
+  const scheduleCycle = (origin: number) => {
+    if (!composition) {
+      return 0;
+    }
+    const sixteenth = 60 / composition.bpm / 4;
+    let time = origin;
+    let cursor = 0;
+    let events = 0;
+    for (let i = 0; i < composition.steps; i += 1) {
+      const when = cursor % 2 === 1 ? time + composition.swing * sixteenth : time;
+      for (const play of slots[cursor] ?? []) {
+        play(when);
+        events += 1;
+      }
+      time += sixteenth;
+      cursor = (cursor + 1) % composition.steps;
+    }
+    return events;
+  };
+
   return {
     play(next, fromStep = 0) {
       stop();
-      ensureTexture(next.seed, next.space.brightness, next.space.softness);
       const now = context.currentTime;
-      const { brightness, softness } = next.space;
-      const { amount, decay, damping, preDelay: delay = 0 } = next.reverb;
-      base = { tone: 1800 + brightness * 7000, keys: 900 + brightness * 3200, wet: 0.05 + amount * 0.55 };
-      const damp = Math.min(1, Math.max(0, damping));
-      ensureImpulse(decay, damp);
-      preDelay.delayTime.setValueAtTime(Math.min(0.08, Math.max(0, delay)), now);
-      const room = 0.84 + Math.min(1, decay / 4.5) * 0.38;
-      earlyTaps.forEach((tap, i) => {
-        tap.l.delayTime.setValueAtTime(Math.min(0.08, EARLY_TAPS[i].l * room), now);
-        tap.r.delayTime.setValueAtTime(Math.min(0.08, EARLY_TAPS[i].r * room), now);
-      });
-      earlyLow.frequency.setValueAtTime(2800 + (1 - damp) * 2400, now);
-      reverbDamp.frequency.setValueAtTime(2400 + (1 - damp) * 5000, now);
-      const tune = (createRng(next.seed ^ 0x9e3779b9).next() - 0.5) * 12;
-      instruments.setSound(next.sound, softness, tune, next.seed);
-      leadFilter.frequency.setValueAtTime(1600 + brightness * 3600, now);
-      wow.frequency.setValueAtTime(next.tape.wowRate, now);
-      flutter.frequency.setValueAtTime(next.tape.flutterRate, now);
-      wowDepth.gain.setValueAtTime(next.tape.depth * WOW_DEPTH_S, now);
-      flutterDepth.gain.setValueAtTime(next.tape.depth * FLUTTER_DEPTH_S, now);
-      startTexture(next.sound.textureAmount, now, next.seed, brightness, softness);
-
+      mountPiece(next, now, false);
       const start = ((fromStep % next.steps) + next.steps) % next.steps;
       const section = [...next.sections].reverse().find((item) => item.step <= start) ?? next.sections[0];
       applySection(section?.tone ?? 1, section?.wet ?? 1, now, 0);
-
-      composition = next;
-      slots = index(next, 60 / next.bpm / 4);
       step = start;
       nextTime = now + START_DELAY_S;
       out.gain.setValueAtTime(0, now + STOP_FADE_S + 0.01);
@@ -1098,20 +1171,29 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     },
     stop,
     wake() {
-      if (!composition) {
+      if (!composition || yielded) {
+        window.clearInterval(timer);
+        timer = 0;
         return idleCatch();
       }
       const caught = tick();
+      if (yielded) {
+        window.clearInterval(timer);
+        timer = 0;
+        return caught;
+      }
       armTimer();
       return caught;
     },
     debugStall(seconds: number) {
-      if (!composition) {
+      if (!composition || yielded) {
         return idleCatch();
       }
       nextTime = context.currentTime - Math.max(0, seconds);
       const caught = tick();
-      armTimer();
+      if (!yielded) {
+        armTimer();
+      }
       return caught;
     },
     health: () => ({
@@ -1169,10 +1251,59 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     setRecoveryListener(listener) {
       catchListener = listener;
     },
+    clock() {
+      if (!composition) {
+        return null;
+      }
+      const sixteenth = 60 / composition.bpm / 4;
+      const now = context.currentTime;
+      const position = scorePosition(step, nextTime, now, sixteenth, composition.steps);
+      return {
+        pieceSeconds: composition.steps * sixteenth,
+        barSeconds: 16 * sixteenth,
+        musicalSeconds: position * sixteenth,
+      };
+    },
+    performScore(next) {
+      yielded = false;
+      retireAt = null;
+      detachOnEnd = false;
+      mountPiece(next, 0, true);
+      const section = next.sections[0];
+      applySection(section?.tone ?? 1, section?.wet ?? 1, 0, 0);
+      step = 0;
+      nextTime = 0;
+      return scheduleCycle(0);
+    },
+    retire(when) {
+      if (!composition || yielded) {
+        return;
+      }
+      const now = context.currentTime;
+      const at = Math.max(now, when);
+      retireAt = at;
+      const fadeFrom = Math.max(now, at - 0.02);
+      out.gain.cancelScheduledValues(now);
+      out.gain.setValueAtTime(out.gain.value, now);
+      out.gain.setValueAtTime(out.gain.value, fadeFrom);
+      out.gain.linearRampToValueAtTime(0, at);
+      haltTexture(at);
+      for (const source of active) {
+        try {
+          source.stop(at + 0.02);
+        } catch {
+          // already stopped
+        }
+      }
+    },
     dispose() {
       stop();
-      wow.stop();
-      flutter.stop();
+      try {
+        wow.stop();
+        flutter.stop();
+      } catch {
+        // already stopped
+      }
       for (const n of [
         out, glue, mud, tone, mix, preDelay, reverb, reverbDamp, reverbSend,
         earlySplit, earlyMerge, earlyLow, earlyGain, wetHigh, wetTrim,
