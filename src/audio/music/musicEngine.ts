@@ -25,15 +25,59 @@ export type SchedulerHealth = {
   lastTickTime: number | null;
   /** Wall time of the last tick, for spotting a timer that stopped firing. */
   lastTickWall: number | null;
-  /** Latest catch-up that skipped a noticeable stretch, if any. */
-  anomaly: { skipped: number; scheduled: number; rewound: boolean } | null;
+  /** Latest catch-up that skipped a noticeable stretch or restored a sustain, if any. */
+  anomaly: SchedulerCatchup | null;
   anomalySerial: number;
 };
 
 export type SchedulerCatchup = {
   skipped: number;
+  /** 16ths committed after the cursor landed. Not the skipped ones. */
   scheduled: number;
+  /** Note callbacks inside that lookahead window. Percussion is not replayed from the gap. */
+  scheduledEvents: number;
   rewound: boolean;
+  /** Sustains recreated from now through the time they still had left. */
+  resumed: { bass: number; chords: number; lead: number };
+  /** Step index before the jump. */
+  fromStep: number | null;
+  /** Step index after the jump, the next 16th to play. */
+  step: number | null;
+  /** Section that owns the landed step. */
+  section: string | null;
+  now: number | null;
+  /** Audio time of the landed step. */
+  cursor: number | null;
+};
+
+export type LayerReport = {
+  /** Looping bed started with the piece. It does not wait on the 25 ms timer. */
+  texture: "active" | "off";
+  /** Wet send after section scaling. The return stays connected for the life of the graph. */
+  reverbSend: number;
+  buses: {
+    out: number;
+    kick: number;
+    snare: number;
+    hats: number;
+    bass: number;
+    chords: number;
+    lead: number;
+  };
+  /** Score says this layer should be inside a note at the clock position. */
+  expected: { bass: boolean; chords: boolean; lead: boolean };
+  /** A note node was started and its written end is still ahead. */
+  sounding: { bass: boolean; chords: boolean; lead: boolean };
+  /** Audio time of the last committed or restored event. */
+  last: {
+    kick: number | null;
+    snare: number | null;
+    hats: number | null;
+    drums: number | null;
+    bass: number | null;
+    chords: number | null;
+    lead: number | null;
+  };
 };
 
 export type MusicEngine = {
@@ -48,8 +92,89 @@ export type MusicEngine = {
    */
   debugStall: (seconds: number) => SchedulerCatchup;
   health: () => SchedulerHealth;
+  /** Expected, sounding, and last-event times. Development snapshot; not a per-tick log. */
+  layers: () => LayerReport;
+  /**
+   * Called after a catch-up jump so persistent fades outside the engine
+   * (music, output, AI buses) can snap if their wall-clock end has passed.
+   */
+  setRecoveryListener: (listener: (() => void) | null) => void;
   dispose: () => void;
 };
+
+const idleCatch = (): SchedulerCatchup => ({
+  skipped: 0,
+  scheduled: 0,
+  scheduledEvents: 0,
+  rewound: false,
+  resumed: { bass: 0, chords: 0, lead: 0 },
+  fromStep: null,
+  step: null,
+  section: null,
+  now: null,
+  cursor: null,
+});
+
+/**
+ * Fractional 16th position of `now`.
+ * A cursor sitting a little ahead of the clock reports the 16th still sounding.
+ * A cursor left behind by a stalled timer reports where the clock has moved to.
+ */
+export function scorePosition(
+  cursorStep: number,
+  nextTime: number,
+  now: number,
+  sixteenth: number,
+  piece: number,
+) {
+  if (!(sixteenth > 0) || piece <= 0 || !Number.isFinite(now) || !Number.isFinite(nextTime)) {
+    return 0;
+  }
+  const pos = cursorStep + (now - nextTime) / sixteenth;
+  return ((pos % piece) + piece) % piece;
+}
+
+/** 16ths since this note's attack, wrapping once so a hold across the loop still matches. */
+export function noteAge(noteStep: number, position: number, piece: number) {
+  let age = position - noteStep;
+  if (age < 0) age += piece;
+  return age;
+}
+
+/**
+ * Seconds left on a sustained note whose attack was never committed.
+ * Returns null when the voice was already scheduled, the note is over,
+ * or the attack is the step the lookahead is about to play.
+ * Drums are not passed here: missed hits stay missed.
+ */
+export function missedSustain(
+  noteStep: number,
+  noteLength: number,
+  cursorStep: number,
+  nextTime: number,
+  now: number,
+  gapStart: number,
+  sixteenth: number,
+  piece: number,
+) {
+  if (!(noteLength > 0) || !(sixteenth > 0) || piece <= 0) {
+    return null;
+  }
+  const age = noteAge(noteStep, scorePosition(cursorStep, nextTime, now, sixteenth, piece), piece);
+  if (age < 0.001 || age >= noteLength) {
+    return null;
+  }
+  const attackAt = now - age * sixteenth;
+  // The tick that stalled had already handed this attack to the audio thread.
+  if (attackAt < gapStart - 0.001) {
+    return null;
+  }
+  const remaining = (noteLength - age) * sixteenth;
+  if (remaining < 0.05) {
+    return null;
+  }
+  return remaining;
+}
 
 /**
  * Jump the scheduler cursor to the audio clock without walking every missed 16th.
@@ -490,12 +615,82 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
   let composition: Composition | null = null;
   /** Per-16th-step note callbacks for the current loop, built once per composition. */
   let slots: ((when: number) => void)[][] = [];
+  /** Chords, bass, and lead only. Drums stay in `slots` and are never restored. */
+  let holds: {
+    layer: "bass" | "chords" | "lead";
+    step: number;
+    length: number;
+    play: (when: number, seconds: number) => void;
+  }[] = [];
   let step = 0;
   let nextTime = 0;
   let lastTickTime: number | null = null;
   let lastTickWall: number | null = null;
   let anomaly: SchedulerHealth["anomaly"] = null;
   let anomalySerial = 0;
+  let catchListener: (() => void) | null = null;
+  /** Wall-clock moment the engine fade to 1 should already have finished. */
+  let outSettleAt = 0;
+  /** Wall-clock moment the texture fade should already have finished. */
+  let textureSettleAt = 0;
+  let textureLevel = 0;
+  let textureCutoff = 3600;
+  const lastAt: Record<"kick" | "snare" | "hats" | "bass" | "chords" | "lead", number | null> = {
+    kick: null,
+    snare: null,
+    hats: null,
+    bass: null,
+    chords: null,
+    lead: null,
+  };
+  const liveUntil = { bass: 0, chords: 0, lead: 0 };
+
+  const markDrum = (layer: "kick" | "snare" | "hats", when: number) => {
+    lastAt[layer] = when;
+  };
+
+  const markSustain = (layer: "bass" | "chords" | "lead", when: number, seconds: number) => {
+    lastAt[layer] = when;
+    liveUntil[layer] = Math.max(liveUntil[layer], when + seconds);
+  };
+
+  const resetLayers = () => {
+    holds = [];
+    lastAt.kick = null;
+    lastAt.snare = null;
+    lastAt.hats = null;
+    lastAt.bass = null;
+    lastAt.chords = null;
+    lastAt.lead = null;
+    liveUntil.bass = 0;
+    liveUntil.chords = 0;
+    liveUntil.lead = 0;
+  };
+
+  /**
+   * Snaps bed levels whose fade end is already in the past.
+   * Note envelopes are left alone. Runs once per fade, not on every tick.
+   */
+  const settleBeds = (now: number) => {
+    const wall = performance.now();
+    if (composition && outSettleAt > 0 && wall >= outSettleAt) {
+      out.gain.cancelScheduledValues(now);
+      out.gain.setValueAtTime(1, now);
+      outSettleAt = 0;
+    }
+    if (textureSource && textureSettleAt > 0 && wall >= textureSettleAt) {
+      textureGain.gain.cancelScheduledValues(now);
+      textureGain.gain.setValueAtTime(textureLevel, now);
+      textureFilter.frequency.cancelScheduledValues(now);
+      textureFilter.frequency.setValueAtTime(textureCutoff, now);
+      const motion = textureMotionNodes;
+      if (motion) {
+        motion.gainDepth.gain.cancelScheduledValues(now);
+        motion.gainDepth.gain.setValueAtTime(textureLevel * 0.03, now);
+      }
+      textureSettleAt = 0;
+    }
+  };
   let impulseKey = "";
 
   const ensureImpulse = (seconds: number, damping: number) => {
@@ -617,6 +812,9 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     textureFilter.frequency.setValueAtTime(textureFilter.frequency.value, when);
     textureFilter.frequency.setTargetAtTime(openCutoff, when, 0.2);
     textureGain.gain.linearRampToValueAtTime(level, when + 0.45);
+    textureLevel = level;
+    textureCutoff = openCutoff;
+    textureSettleAt = performance.now() + 450;
     const source = context.createBufferSource();
     source.buffer = ensureTexture(seed, brightness, softness);
     source.loop = true;
@@ -645,6 +843,7 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
 
   const index = (c: Composition, sixteenth: number) => {
     const table: ((when: number) => void)[][] = Array.from({ length: c.steps }, () => []);
+    holds = [];
     const at = (s: number, fn: (when: number) => void) => table[s % c.steps].push(fn);
     for (const section of c.sections) {
       // Sections glide in over about a bar rather than switching abruptly.
@@ -656,50 +855,149 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     for (const hit of c.drums) {
       if (hit.kind === "kick") {
         const color = kickTone.next();
-        at(hit.step, (when) => instruments.kick(when + hit.nudge, hit.velocity, color));
+        at(hit.step, (when) => {
+          if (hit.velocity > 0) markDrum("kick", when);
+          instruments.kick(when + hit.nudge, hit.velocity, color);
+        });
       } else if (hit.kind === "snare") {
         const color = snareTone.next();
-        at(hit.step, (when) => instruments.snare(when + hit.nudge, hit.velocity, color));
+        at(hit.step, (when) => {
+          if (hit.velocity > 0) markDrum("snare", when);
+          instruments.snare(when + hit.nudge, hit.velocity, color);
+        });
       } else {
         const color = hatTone.next();
-        at(hit.step, (when) => instruments[hit.kind](when + hit.nudge, hit.velocity, color));
+        at(hit.step, (when) => {
+          if (hit.velocity > 0) markDrum("hats", when);
+          instruments[hit.kind](when + hit.nudge, hit.velocity, color);
+        });
       }
     }
     const tone = createRng(c.seed ^ 0xb5297a4d);
     for (const n of c.bass) {
       const color = tone.next();
-      at(n.step, (when) => instruments.bass(when + n.nudge, n.length * sixteenth, n.midi, n.velocity, color));
+      const duration = n.length * sixteenth;
+      if (n.velocity > 0 && n.length > 0) {
+        holds.push({
+          layer: "bass",
+          step: n.step % c.steps,
+          length: n.length,
+          play(when, remain) {
+            markSustain("bass", when, remain);
+            instruments.bass(when, remain, n.midi, n.velocity, color);
+          },
+        });
+      }
+      at(n.step, (when) => {
+        if (n.velocity > 0) markSustain("bass", when, duration);
+        instruments.bass(when + n.nudge, duration, n.midi, n.velocity, color);
+      });
     }
     for (const chord of c.chords) {
-      at(chord.step, (when) => instruments.keys(when + chord.nudge, chord.length * sixteenth, chord));
+      const duration = chord.length * sixteenth;
+      if (chord.velocity > 0 && chord.length > 0) {
+        holds.push({
+          layer: "chords",
+          step: chord.step % c.steps,
+          length: chord.length,
+          play(when, remain) {
+            markSustain("chords", when, remain);
+            instruments.keys(when, remain, chord);
+          },
+        });
+      }
+      at(chord.step, (when) => {
+        if (chord.velocity > 0) markSustain("chords", when, duration);
+        instruments.keys(when + chord.nudge, duration, chord);
+      });
     }
     for (const n of c.melody) {
       const color = tone.next();
-      at(n.step, (when) => instruments.lead(when + n.nudge, n.length * sixteenth, n.midi, n.velocity, color));
+      const duration = n.length * sixteenth;
+      if (n.velocity > 0 && n.length > 0) {
+        holds.push({
+          layer: "lead",
+          step: n.step % c.steps,
+          length: n.length,
+          play(when, remain) {
+            markSustain("lead", when, remain);
+            instruments.lead(when, remain, n.midi, n.velocity, color);
+          },
+        });
+      }
+      at(n.step, (when) => {
+        if (n.velocity > 0) markSustain("lead", when, duration);
+        instruments.lead(when + n.nudge, duration, n.midi, n.velocity, color);
+      });
     }
     return table;
   };
 
   const tick = (): SchedulerCatchup => {
     if (!composition) {
-      return { skipped: 0, scheduled: 0, rewound: false };
+      return idleCatch();
     }
     const now = context.currentTime;
+    settleBeds(now);
     const sixteenth = 60 / composition.bpm / 4;
+    const fromStep = step;
+    const gapStart = nextTime;
     const caught = catchUpCursor(nextTime, step, composition.steps, now, sixteenth);
     nextTime = caught.nextTime;
     step = caught.step;
+    const resumed = { bass: 0, chords: 0, lead: 0 };
+    let sectionName: string | null = null;
     if (caught.skipped > 0) {
       const section = [...composition.sections].reverse().find((item) => item.step <= step) ?? composition.sections[0];
+      sectionName = section?.kind ?? null;
+      // Tone, keys filter, and reverb send. Density and transitions live in the event list.
       applySection(section?.tone ?? 1, section?.wet ?? 1, now, 0);
+      const upcoming = new Set<number>();
+      let scanTime = nextTime;
+      let scanStep = step;
+      while (scanTime < now + LOOKAHEAD_S) {
+        const when = scanStep % 2 === 1 ? scanTime + composition.swing * sixteenth : scanTime;
+        if (when >= now - 0.05) {
+          upcoming.add(scanStep);
+        }
+        scanTime += sixteenth;
+        scanStep = (scanStep + 1) % composition.steps;
+      }
+      for (const hold of holds) {
+        // The lookahead is about to play this attack itself.
+        if (upcoming.has(hold.step)) {
+          continue;
+        }
+        const remaining = missedSustain(
+          hold.step,
+          hold.length,
+          step,
+          nextTime,
+          now,
+          gapStart,
+          sixteenth,
+          composition.steps,
+        );
+        if (remaining == null) {
+          continue;
+        }
+        // Start at the clock, for the time the note still had. The missed attack is not replayed.
+        hold.play(now, remaining);
+        resumed[hold.layer] += 1;
+      }
+      catchListener?.();
     }
+    const landedStep = step;
+    const landedCursor = nextTime;
     let scheduled = 0;
+    let scheduledEvents = 0;
     while (nextTime < now + LOOKAHEAD_S) {
       const when = step % 2 === 1 ? nextTime + composition.swing * sixteenth : nextTime;
       // A 16th that is already late stays skipped. The lookahead only commits what is due now.
       if (when >= now - 0.05) {
         for (const play of slots[step] ?? []) {
           play(when);
+          scheduledEvents += 1;
         }
         scheduled += 1;
       }
@@ -708,13 +1006,27 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     }
     lastTickTime = now;
     lastTickWall = performance.now();
-    if (caught.skipped >= 8 || caught.rewound) {
+    const report: SchedulerCatchup = {
+      skipped: caught.skipped,
+      scheduled,
+      scheduledEvents,
+      rewound: caught.rewound,
+      resumed,
+      fromStep,
+      step: landedStep,
+      section: sectionName,
+      now,
+      cursor: landedCursor,
+    };
+    const restored = resumed.bass + resumed.chords + resumed.lead;
+    if (caught.skipped >= 8 || caught.rewound || restored > 0) {
       anomalySerial += 1;
-      anomaly = { skipped: caught.skipped, scheduled, rewound: caught.rewound };
+      anomaly = report;
     }
-    return { skipped: caught.skipped, scheduled, rewound: caught.rewound };
+    return report;
   };
 
+  /** One lookahead timer. The previous id is cleared before the new one is armed. */
   const armTimer = () => {
     window.clearInterval(timer);
     timer = window.setInterval(tick, TICK_MS);
@@ -725,6 +1037,9 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     timer = 0;
     composition = null;
     anomaly = null;
+    outSettleAt = 0;
+    textureSettleAt = 0;
+    resetLayers();
     const now = context.currentTime;
     haltTexture(now);
     out.gain.cancelScheduledValues(now);
@@ -776,6 +1091,7 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       nextTime = now + START_DELAY_S;
       out.gain.setValueAtTime(0, now + STOP_FADE_S + 0.01);
       out.gain.linearRampToValueAtTime(1, now + START_DELAY_S - 0.01);
+      outSettleAt = performance.now() + Math.max(0, START_DELAY_S - 0.01) * 1000;
       anomaly = null;
       tick();
       armTimer();
@@ -783,7 +1099,7 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     stop,
     wake() {
       if (!composition) {
-        return { skipped: 0, scheduled: 0, rewound: false };
+        return idleCatch();
       }
       const caught = tick();
       armTimer();
@@ -791,7 +1107,7 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
     },
     debugStall(seconds: number) {
       if (!composition) {
-        return { skipped: 0, scheduled: 0, rewound: false };
+        return idleCatch();
       }
       nextTime = context.currentTime - Math.max(0, seconds);
       const caught = tick();
@@ -807,6 +1123,52 @@ export function createMusicEngine(context: AudioContext, destination: AudioNode)
       anomaly,
       anomalySerial,
     }),
+    layers() {
+      const now = context.currentTime;
+      const drumTimes = [lastAt.kick, lastAt.snare, lastAt.hats].filter((value): value is number => value != null);
+      const expected = { bass: false, chords: false, lead: false };
+      if (composition) {
+        const sixteenth = 60 / composition.bpm / 4;
+        const position = scorePosition(step, nextTime, now, sixteenth, composition.steps);
+        for (const hold of holds) {
+          const age = noteAge(hold.step, position, composition.steps);
+          if (age > 0.001 && age < hold.length) {
+            expected[hold.layer] = true;
+          }
+        }
+      }
+      return {
+        texture: textureSource ? "active" : "off",
+        reverbSend: reverbSend.gain.value,
+        buses: {
+          out: out.gain.value,
+          kick: kickBus.gain.value,
+          snare: snareBus.gain.value,
+          hats: hatBus.gain.value,
+          bass: bassLevel.gain.value,
+          chords: keysTrim.gain.value,
+          lead: leadPan.gain.value,
+        },
+        expected,
+        sounding: {
+          bass: liveUntil.bass > now,
+          chords: liveUntil.chords > now,
+          lead: liveUntil.lead > now,
+        },
+        last: {
+          kick: lastAt.kick,
+          snare: lastAt.snare,
+          hats: lastAt.hats,
+          drums: drumTimes.length > 0 ? Math.max(...drumTimes) : null,
+          bass: lastAt.bass,
+          chords: lastAt.chords,
+          lead: lastAt.lead,
+        },
+      };
+    },
+    setRecoveryListener(listener) {
+      catchListener = listener;
+    },
     dispose() {
       stop();
       wow.stop();

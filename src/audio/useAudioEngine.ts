@@ -25,7 +25,7 @@ import {
 import { createAiLibrary, type AiLibrary, type MusicSource } from "@/audio/ai/aiMusic";
 import { compose, describeComposition, type Composition } from "@/audio/music/composer";
 import { describeSilence } from "@/audio/music/silence";
-import { createMusicEngine, type MusicEngine } from "@/audio/music/musicEngine";
+import { createMusicEngine, type MusicEngine, type SchedulerCatchup } from "@/audio/music/musicEngine";
 import { type NowPlayingInfo } from "@/audio/music/nowPlaying";
 import { randomSeed } from "@/audio/music/random";
 import type { World, WorldId } from "@/worlds/types";
@@ -50,7 +50,7 @@ type MusicDevHandle = {
   /** Compact playback snapshot. Development only. */
   audioDebug: () => string;
   /** Run one scheduler tick as if the timer woke this many seconds late. */
-  simulateStall: (seconds: number) => { skipped: number; scheduled: number; rewound: boolean } | null;
+  simulateStall: (seconds: number) => SchedulerCatchup | null;
   /**
    * One suspend-then-resume of the existing context. Development only.
    * Does not create a new AudioContext.
@@ -162,11 +162,43 @@ function createGraph(volume: number): AudioGraph {
   };
 }
 
-function fadeTo(gain: GainNode, value: number, seconds = 0.85) {
+type PendingFade = { param: AudioParam; target: number; endWall: number };
+
+function rememberFade(ledger: PendingFade[], param: AudioParam, target: number, endWall: number) {
+  const mark = { param, target, endWall };
+  const index = ledger.findIndex((fade) => fade.param === param);
+  if (index >= 0) {
+    ledger[index] = mark;
+  } else {
+    ledger.push(mark);
+  }
+}
+
+function fadeTo(ledger: PendingFade[], gain: GainNode, value: number, seconds = 0.85) {
   const now = gain.context.currentTime;
+  const duration = Math.max(0, seconds);
   gain.gain.cancelScheduledValues(now);
   gain.gain.setValueAtTime(gain.gain.value, now);
-  gain.gain.linearRampToValueAtTime(value, now + seconds);
+  if (duration <= 0) {
+    gain.gain.setValueAtTime(value, now);
+  } else {
+    gain.gain.linearRampToValueAtTime(value, now + duration);
+  }
+  rememberFade(ledger, gain.gain, value, performance.now() + duration * 1000);
+}
+
+/** If a fade's wall-clock end has passed, the param is set to that target. In-flight fades are left alone. */
+function reconcileFades(ledger: PendingFade[], now: number) {
+  const wall = performance.now();
+  for (let i = ledger.length - 1; i >= 0; i -= 1) {
+    const fade = ledger[i];
+    if (wall + 40 < fade.endWall) {
+      continue;
+    }
+    fade.param.cancelScheduledValues(now);
+    fade.param.setValueAtTime(fade.target, now);
+    ledger.splice(i, 1);
+  }
 }
 
 function composeFor(world: World, previousSeed?: number) {
@@ -229,6 +261,7 @@ export function useAudioEngine(initialWorld: World) {
   const kickedRef = useRef(false);
   const resumeAttemptRef = useRef(false);
   const seenAnomalyRef = useRef(0);
+  const fadesRef = useRef<PendingFade[]>([]);
 
   const recoverPlayback = useCallback(async (reason: string) => {
     const graph = graphRef.current;
@@ -253,6 +286,8 @@ export function useAudioEngine(initialWorld: World) {
           logAudio("resume retry via suspend", { reason, to: kicked });
         }
       }
+      reconcileFades(fadesRef.current, graph.context.currentTime);
+      graph.ai.settle();
       const caught = graph.engine.wake();
       if (caught.skipped > 0 || caught.rewound) {
         logAudio("scheduler resync", { reason, ...caught });
@@ -294,6 +329,10 @@ export function useAudioEngine(initialWorld: World) {
       graph.context.addEventListener("statechange", onState);
       contextHookedRef.current = true;
     }
+    graph.engine.setRecoveryListener(() => {
+      reconcileFades(fadesRef.current, graph.context.currentTime);
+      graph.ai.settle();
+    });
     // resume() runs synchronously inside the click/keypress so autoplay policy allows it.
     const before = contextState(graph.context);
     if (before !== "running") {
@@ -383,7 +422,7 @@ export function useAudioEngine(initialWorld: World) {
       graph.engine.play(composition, fromStep);
       soundingRef.current = { worldId, composition };
       setNowPlaying(snapshot(worldId, composition));
-      fadeTo(graph.music, 1, fadeInSeconds);
+      fadeTo(fadesRef.current, graph.music, 1, fadeInSeconds);
       graph.ai.engage(getWorldById(worldId));
     },
     [clearNextTimer],
@@ -431,7 +470,7 @@ export function useAudioEngine(initialWorld: World) {
     if (nextTimerRef.current) {
       return;
     }
-    fadeTo(graph.music, 0, NEXT_FADE_OUT_S);
+    fadeTo(fadesRef.current, graph.music, 0, NEXT_FADE_OUT_S);
     nextTimerRef.current = window.setTimeout(() => {
       nextTimerRef.current = 0;
       const current = worldRef.current;
@@ -526,6 +565,9 @@ export function useAudioEngine(initialWorld: World) {
         stage.gain.cancelScheduledValues(graph.context.currentTime);
         stage.gain.value = 1;
       }
+      fadesRef.current = fadesRef.current.filter(
+        (fade) => fade.param !== graph.output.gain && fade.param !== graph.music.gain,
+      );
     }
     setStatus("idle");
   }, [clearNextTimer, stopAmbience, stopEventSound]);
@@ -582,7 +624,7 @@ export function useAudioEngine(initialWorld: World) {
       }
       preloadWorldAmbience(graph.context, world);
       if (playingRef.current) {
-        fadeTo(graph.output, 0, TRANSITION_FADE_S);
+        fadeTo(fadesRef.current, graph.output, 0, TRANSITION_FADE_S);
       }
     },
     [clearNextTimer, stopEventSound],
@@ -598,14 +640,14 @@ export function useAudioEngine(initialWorld: World) {
           setNowPlaying(snapshot(world.id, compositionRef.current));
         }
         if (graph) {
-          fadeTo(graph.output, 1, 0.05);
+          fadeTo(fadesRef.current, graph.output, 1, 0.05);
         }
         return;
       }
       // Swapped under the cover while output is faded out, so the restart is inaudible.
       startWorldAudio(world);
       if (graph) {
-        fadeTo(graph.output, 1, TRANSITION_FADE_S);
+        fadeTo(fadesRef.current, graph.output, 1, TRANSITION_FADE_S);
       }
     },
     [startWorldAudio],
@@ -618,6 +660,7 @@ export function useAudioEngine(initialWorld: World) {
     const graph = graphRef.current;
     if (graph) {
       graph.master.gain.setTargetAtTime(clamped, graph.context.currentTime, 0.02);
+      rememberFade(fadesRef.current, graph.master.gain, clamped, performance.now() + 250);
     }
   }, []);
 
@@ -665,7 +708,25 @@ export function useAudioEngine(initialWorld: World) {
     }
     const ai = graph?.ai.status();
     const ambienceVoices = voicesRef.current.size;
+    const layers = graph?.engine.layers();
     const fmt = (value: number | null) => (value == null ? "n/a" : value.toFixed(2));
+    const ago = (when: number | null) => {
+      if (when == null || now == null) {
+        return "none";
+      }
+      const delta = now - when;
+      if (!Number.isFinite(delta)) {
+        return "none";
+      }
+      return delta < 0 ? "ahead" : `${delta.toFixed(1)}s ago`;
+    };
+    const yesNo = (value: boolean) => (value ? "yes" : "no");
+    const sustain = (layer: "chords" | "bass" | "lead") => {
+      if (!layers) {
+        return "n/a";
+      }
+      return `last ${ago(layers.last[layer])} / expected ${yesNo(layers.expected[layer])} / sounding ${yesNo(layers.sounding[layer])}`;
+    };
     return [
       `Context: ${graph ? contextState(graph.context) : "none"}`,
       `Context time: ${fmt(now)}`,
@@ -678,10 +739,19 @@ export function useAudioEngine(initialWorld: World) {
       `Master gain: ${graph ? graph.master.gain.value.toFixed(2) : "n/a"}`,
       `Output gain: ${graph ? graph.output.gain.value.toFixed(2) : "n/a"}`,
       `Music gain: ${graph ? graph.music.gain.value.toFixed(2) : "n/a"}`,
+      `Engine gain: ${layers ? layers.buses.out.toFixed(2) : "n/a"}`,
       `Music source: ${ai?.source ?? "none"}`,
-      `AI: ${ai ? `${ai.source}, ${ai.engaged ? "engaged" : "idle"}, ${ai.voices} voice${ai.voices === 1 ? "" : "s"}` : "none"}`,
-      `Ambience: ${ambienceVoices} voice${ambienceVoices === 1 ? "" : "s"}`,
+      `AI: ${ai ? `${ai.source}, ${ai.engaged ? "engaged" : "idle"}, ${ai.voices} voice${ai.voices === 1 ? "" : "s"}, procedural ${ai.proceduralGain.toFixed(2)}, bus ${ai.aiBusGain.toFixed(2)}` : "none"}`,
       `Contexts created: ${contextsCreatedRef.current}`,
+      "Layers:",
+      `  texture: ${layers?.texture ?? "off"}`,
+      `  ambience: ${ambienceVoices} active`,
+      `  reverb: send ${layers ? layers.reverbSend.toFixed(2) : "n/a"}, return connected`,
+      `  chords: ${sustain("chords")}`,
+      `  bass: ${sustain("bass")}`,
+      `  lead: ${sustain("lead")}`,
+      `  drums: last ${ago(layers?.last.drums ?? null)} (kick ${ago(layers?.last.kick ?? null)}, snare ${ago(layers?.last.snare ?? null)}, hats ${ago(layers?.last.hats ?? null)})`,
+      `  buses: kick ${layers ? layers.buses.kick.toFixed(2) : "n/a"}, snare ${layers ? layers.buses.snare.toFixed(2) : "n/a"}, hats ${layers ? layers.buses.hats.toFixed(2) : "n/a"}, bass ${layers ? layers.buses.bass.toFixed(2) : "n/a"}, chords ${layers ? layers.buses.chords.toFixed(2) : "n/a"}, lead ${layers ? layers.buses.lead.toFixed(2) : "n/a"}`,
     ].join("\n");
   }, []);
 
@@ -722,6 +792,8 @@ export function useAudioEngine(initialWorld: World) {
           void kickContext(graph.context).then((next) => {
             logAudio("kick result", { context: next });
             if (playingRef.current) {
+              reconcileFades(fadesRef.current, graph.context.currentTime);
+              graph.ai.settle();
               graph.engine.wake();
             }
           });
@@ -733,6 +805,8 @@ export function useAudioEngine(initialWorld: World) {
       const timerStale = health.lastTickWall != null && wall - health.lastTickWall > 3000;
       const cursorBehind = health.nextTime != null && health.nextTime - now < -1.5;
       if (state === "running" && (timerStale || cursorBehind)) {
+        reconcileFades(fadesRef.current, graph.context.currentTime);
+        graph.ai.settle();
         const caught = graph.engine.wake();
         logAudio("scheduler restart", { timerStale, cursorBehind, ...caught });
       }
@@ -778,6 +852,7 @@ export function useAudioEngine(initialWorld: World) {
         const before = contextState(graph.context);
         const after = before === "running" ? await kickContext(graph.context) : await resumeContext(graph.context);
         if (playingRef.current) {
+          reconcileFades(fadesRef.current, graph.context.currentTime);
           graph.engine.wake();
           graph.ai.revive();
         }
